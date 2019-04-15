@@ -1,6 +1,5 @@
 package pgqueue
 
-import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.*
 
 enum class Ack {
@@ -8,8 +7,8 @@ enum class Ack {
     Requeue
 }
 
-class PGQueue<Subscription, Message>(
-    internal val driver: Driver<Subscription, Message>
+class PGSubscriber<Subscription, Message>(
+    internal val driver: SubscriberDriver<Subscription, Message>
 ) {
     suspend fun subscribe(subscription: Subscription): SubscriptionHandle<Message> {
         driver.insertSubscription(subscription)
@@ -29,7 +28,11 @@ class PGQueue<Subscription, Message>(
             }
         }
     }
+}
 
+class PGPublisher<Message>(
+    internal val driver: PublisherDriver<Message>
+) {
     suspend fun publish(m: Message) {
         driver.publish(m)
     }
@@ -39,10 +42,13 @@ interface SubscriptionHandle<Message> {
     suspend fun handle(handler: suspend (Message) -> Ack)
 }
 
-interface Driver<Subscription, Message> {
+interface SubscriberDriver<Subscription, Message> {
     suspend fun insertSubscription(s: Subscription)
     suspend fun listenForMessages(s: Subscription): DeliveryListener<Message>
     suspend fun fetchPendingMessages(s: Subscription): DeliveryListener<Message>
+}
+
+interface PublisherDriver<Message> {
     suspend fun publish(m: Message)
 }
 

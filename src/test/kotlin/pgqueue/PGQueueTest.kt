@@ -10,8 +10,8 @@ import kotlin.test.assertEquals
 class PGQueueTest {
     @Test
     fun testSubscribe() = runBlocking {
-        val driver = mockk<Driver<String, Message>>()
-        val queue = PGQueue(driver)
+        val driver = mockk<SubscriberDriver<String, Message>>()
+        val queue = PGSubscriber(driver)
 
         // Subscribing should call subscribe on the driver.
 
@@ -112,8 +112,8 @@ class PGQueueTest {
 
     @Test
     fun testPublish() = runBlocking {
-        val driver = mockk<Driver<Unit, Int>>()
-        val queue = PGQueue(driver)
+        val driver = mockk<PublisherDriver<Int>>()
+        val queue = PGPublisher(driver)
 
         coEvery { driver.publish(any()) } answers {}
 
