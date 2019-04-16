@@ -121,6 +121,44 @@ class PGQueueTest {
 
         coVerify { driver.publish(123) }
     }
+
+    @Test
+    fun testSubscribe_requeue_on_crash() = runBlocking {
+        val driver = mockk<SubscriberDriver<String, Int>>()
+        val queue = PGSubscriber(driver)
+
+        coEvery { driver.insertSubscription("sub") } answers {}
+
+        val deliveries = Channel<Delivery<Int>>()
+
+        coEvery { driver.fetchPendingMessages("sub") } returns deliveries.toDeliveryListener()
+        coEvery { driver.listenForMessages("sub") } returns deliveries.toDeliveryListener()
+
+        val handler = launch {
+            var caught = false
+            try {
+                queue.subscribe("sub").handle {
+                    throw Exception("oops")
+                }
+            } catch (_: Exception) {
+                caught = true
+            }
+            assert(caught)
+        }
+
+        val gotAck = Channel<Ack>()
+
+        deliveries.send(object : Delivery<Int> {
+            override suspend fun unwrap(): Int = 123
+            override suspend fun ack(ack: Ack) {
+                gotAck.send(ack)
+            }
+        })
+
+        assertEquals(Ack.Requeue, soon { gotAck.receive() })
+
+        soon { handler.join() }
+    }
 }
 
 private data class Message(val payload: String)
@@ -155,6 +193,12 @@ private fun Channel<Pair<String, Ack>>.toDeliveryListener(
         SuspendCloseable by (closer),
         ReceiveChannel<Delivery<Message>> by (deliveries) {}
 }
+
+private fun <T> ReceiveChannel<Delivery<T>>.toDeliveryListener(closer: SuspendCloseable = SuspendCloseable {}): DeliveryListener<T> =
+    object :
+        DeliveryListener<T>,
+        SuspendCloseable by (closer),
+        ReceiveChannel<Delivery<T>> by (this) {}
 
 @Throws(TimeoutCancellationException::class)
 private suspend fun <T> soon(block: suspend () -> T): T =

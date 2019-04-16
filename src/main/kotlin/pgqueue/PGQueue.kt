@@ -17,8 +17,13 @@ class PGSubscriber<Subscription, Message>(
             override suspend fun handle(handler: suspend (Message) -> Ack) {
                 val consume: suspend (DeliveryListener<Message>) -> Unit = { deliveries ->
                     for (delivery in deliveries) {
-                        val message = delivery.unwrap()
-                        delivery.ack(handler(message))
+                        var ack: Ack? = null
+                        try {
+                            val message = delivery.unwrap()
+                            ack = handler(message)
+                        } finally {
+                            delivery.ack(ack ?: Ack.Requeue)
+                        }
                     }
                 }
 
