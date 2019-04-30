@@ -1,10 +1,17 @@
 package pgqueue
 
-import io.mockk.*
-import kotlin.test.Test
-import kotlinx.coroutines.*
-import kotlinx.coroutines.channels.*
+import io.mockk.coEvery
+import io.mockk.coVerify
+import io.mockk.mockk
+import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.Channel.Factory.UNLIMITED
+import kotlinx.coroutines.channels.ReceiveChannel
+import kotlinx.coroutines.channels.SendChannel
+import kotlinx.coroutines.channels.map
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlin.test.Test
 import kotlin.test.assertEquals
 
 class PGQueueTest {
@@ -17,7 +24,7 @@ class PGQueueTest {
 
         coEvery { driver.insertSubscription(any()) } answers {}
 
-        val handles = listOf("subA", "subB").map { sub ->
+        val consumers = listOf("subA", "subB").map { sub ->
             sub to queue.subscribe(sub).also {
                 coVerify { driver.insertSubscription(sub) }
             }
@@ -69,17 +76,15 @@ class PGQueueTest {
         }
 
         for (sub in listOf("subA", "subB")) {
-            val handle = handles[sub]!!
+            val consumer = consumers[sub]!!
             val handled = Channel<Pair<String, SendChannel<Ack>>>()
 
-            val handler = launch {
+            val stopConsumer = start(consumer) { msg ->
                 // Our handler will send us the received payload and a channel
                 // to send the ACK we want.
-                handle.handle { msg ->
-                    val ack = Channel<Ack>()
-                    handled.send(msg.payload to (ack as SendChannel<Ack>))
-                    ack.receive()
-                }
+                val ack = Channel<Ack>()
+                handled.send(msg.payload to (ack as SendChannel<Ack>))
+                ack.receive()
             }
 
             val consume: suspend (Iterable<Op>).() -> Unit = {
@@ -105,8 +110,7 @@ class PGQueueTest {
             incoming[sub]!!.close()
             soon { closesBySub[sub]!!.receive() }
 
-            // If the incoming DeliveryListener is closed, handle should return.
-            soon { handler.join() }
+            stopConsumer()
         }
     }
 
@@ -134,30 +138,26 @@ class PGQueueTest {
         coEvery { driver.fetchPendingMessages("sub") } returns deliveries.toDeliveryListener()
         coEvery { driver.listenForMessages("sub") } returns deliveries.toDeliveryListener()
 
-        val handler = launch {
-            var caught = false
-            try {
-                queue.subscribe("sub").handle {
-                    throw Exception("oops")
-                }
-            } catch (_: Exception) {
-                caught = true
-            }
-            assert(caught)
+        val stopHandler = start(queue.subscribe("sub")) {
+            throw Exception("oops")
         }
 
         val gotAck = Channel<Ack>()
 
-        deliveries.send(object : Delivery<Int> {
-            override suspend fun unwrap(): Int = 123
-            override suspend fun ack(ack: Ack) {
-                gotAck.send(ack)
+        (0 until 2).forEach {
+            soon {
+                deliveries.send(object : Delivery<Int> {
+                    override suspend fun unwrap(): Int = 123
+                    override suspend fun ack(ack: Ack) {
+                        gotAck.send(ack)
+                    }
+                })
             }
-        })
 
-        assertEquals(Ack.Requeue, soon { gotAck.receive() })
+            assertEquals(Ack.Requeue, soon { gotAck.receive() })
+        }
 
-        soon { handler.join() }
+        soon { stopHandler() }
     }
 }
 
