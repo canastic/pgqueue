@@ -202,4 +202,21 @@ private fun <T> ReceiveChannel<Delivery<T>>.toDeliveryListener(closer: SuspendCl
 
 @Throws(TimeoutCancellationException::class)
 private suspend fun <T> soon(block: suspend () -> T): T =
-    withTimeout(50L) { block() }
+    keepStack { withTimeout(50L) { block() } }
+
+internal suspend fun <T> keepStack(block: suspend () -> T): T = stackChainer().let { chain ->
+    try {
+        block()
+    } catch (t: Throwable) {
+        throw chain(t)
+    }
+}
+
+fun stackChainer(): (Throwable) -> Throwable {
+    val original = Throwable()
+    return { t ->
+        RuntimeException("exception caught while handling async operation result: $t", t).apply {
+            stackTrace = original.stackTrace
+        }
+    }
+}

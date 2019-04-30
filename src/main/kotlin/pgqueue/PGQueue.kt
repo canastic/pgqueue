@@ -8,7 +8,6 @@ import kotlinx.coroutines.channels.SendChannel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.SelectBuilder
 import kotlinx.coroutines.selects.select
-import java.util.concurrent.atomic.AtomicBoolean
 
 enum class Ack {
     OK,
@@ -54,6 +53,7 @@ class PGSubscriber<Subscription, Message>(
                         }
 
                     val listener = driver.listenForMessages(subscription)
+
                     driver.fetchPendingMessages(subscription).use { consume(it) }
                     listener.use { consume(it) }
                 }
@@ -65,15 +65,16 @@ class PGSubscriber<Subscription, Message>(
 internal object doneSelecting : Throwable()
 
 @ExperimentalCoroutinesApi
-suspend fun CoroutineScope.selectWhileNotStopped(
-    stop: ReceiveChannel<SendChannel<Unit>>,
+suspend fun <T> selectWhileNotStopped(
+    stop: ReceiveChannel<T>,
     block: SelectBuilder<Unit>.(Throwable) -> Unit
-) {
+): T? {
+    var resp: T? = null
     try {
         while (true) {
             select<Unit> {
-                stop.onReceiveOrNull { resp ->
-                    resp?.send(Unit)
+                stop.onReceiveOrNull { r ->
+                    resp = r
                     throw doneSelecting
                 }
                 block(doneSelecting)
@@ -81,25 +82,26 @@ suspend fun CoroutineScope.selectWhileNotStopped(
         }
     } catch (t: doneSelecting) {
     }
+    return resp
 }
 
-suspend fun CoroutineScope.launchStoppable(block: suspend CoroutineScope.(ReceiveChannel<SendChannel<Unit>>) -> Unit): Stoppable {
-    val done = AtomicBoolean(false)
-    val stop = Channel<Channel<Unit>>()
+suspend fun CoroutineScope.launchStoppable(block: suspend CoroutineScope.(ReceiveChannel<Unit>) -> Unit): Stoppable {
+    val done = Channel<Unit>()
+    val stop = Channel<Unit>()
 
     launch {
         try {
             block(stop)
         } finally {
-            done.set(true)
+            done.close()
         }
     }
 
     return asStop {
-        if (!done.get()) {
-            stop.roundTrip()
+        if (!stop.isClosedForSend) {
             stop.close()
         }
+        done.receiveOrNull()
     }
 }
 
