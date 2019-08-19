@@ -41,7 +41,7 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 			for d := range deliveries {
 				err := handleDelivery(d, getHandler)
 				if err != nil {
-					return err
+					return xerrors.Errorf("handling delivery: %w", err)
 				}
 			}
 			return nil
@@ -53,7 +53,12 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 				return xerrors.Errorf("fetching pending deliveries: %w", err)
 			}
 
-			return acceptIncoming(ctx, deliveries)
+			err = acceptIncoming(ctx, deliveries)
+			if err != nil {
+				return xerrors.Errorf("accepting incoming deliveries: %w", err)
+			}
+
+			return nil
 		})
 	}, nil
 }
@@ -97,6 +102,8 @@ type SubscriptionDriver interface {
 	ListenForDeliveries(context.Context) (accept func(context.Context, chan<- Delivery) error, err error)
 	FetchPendingDeliveries(context.Context, chan<- Delivery) error
 }
+
+//go:generate make.go.mock -type Delivery
 
 // A Delivery is an attempted delivery of a message.
 type Delivery interface {

@@ -2,11 +2,13 @@ package pgqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"gitlab.com/canastic/chantest"
+	"golang.org/x/xerrors"
 )
 
 func TestSubscribe(t *testing.T) {
@@ -176,6 +178,108 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 
 	cancel()
 	chantest.Expect(t, stopConsuming)
+}
+
+func TestErrorOnInsert(t *testing.T) {
+	expectedErr := errors.New("oops")
+
+	driver, assertMock := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().Returns(expectedErr).Times(1).
+		Mock()
+	defer assertMock(t)
+
+	_, err := Subscribe(driver)
+	assert.True(t, xerrors.Is(err, expectedErr), err)
+}
+
+func TestErrorOnListen(t *testing.T) {
+	expectedErr := errors.New("oops")
+
+	driver, assertMock := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().Returns(nil).Times(1).
+		ListenForDeliveries().TakesAny().Returns(nil, expectedErr).Times(1).
+		Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(driver)
+	assert.NoError(t, err)
+	err = consume(context.Background(), nil)
+	assert.True(t, xerrors.Is(err, expectedErr), err)
+}
+
+func TestErrorOnFetchPending(t *testing.T) {
+	expectedErr := errors.New("oops")
+
+	m := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().Returns(nil).Times(1)
+
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
+		<-ctx.Done()
+		return nil
+	}, nil).Times(1)
+
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(expectedErr).Times(1)
+
+	driver, assertMock := m.Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(driver)
+	assert.NoError(t, err)
+	err = consume(context.Background(), nil)
+	assert.True(t, xerrors.Is(err, expectedErr), err)
+}
+
+func TestErrorOnAccept(t *testing.T) {
+	expectedErr := errors.New("oops")
+
+	m := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().Returns(nil).Times(1)
+
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
+		return expectedErr
+	}, nil).Times(1)
+
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
+
+	driver, assertMock := m.Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(driver)
+	assert.NoError(t, err)
+	err = consume(context.Background(), nil)
+	assert.True(t, xerrors.Is(err, expectedErr), err)
+}
+
+func TestErrorOnUnwrap(t *testing.T) {
+	expectedErr := errors.New("oops")
+
+	m := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().Returns(nil).Times(1)
+
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+		delivery, assertMock := (&DeliveryMocker{}).Describe().
+			UnwrapMessage().TakesAny().Returns(expectedErr).Times(1).
+			Ack().TakesAny().Returns(nil).Times(1).
+			Mock()
+		defer assertMock(t)
+
+		deliveries <- delivery
+
+		<-ctx.Done()
+		return nil
+	}, nil).Times(1)
+
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
+
+	driver, assertMock := m.Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(driver)
+	assert.NoError(t, err)
+	err = consume(context.Background(), func() (unwrapInto interface{}, handle func() Ack) {
+		return nil, nil
+	})
+	assert.True(t, xerrors.Is(err, expectedErr), err)
 }
 
 type fakeMessage struct {
