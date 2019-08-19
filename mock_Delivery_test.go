@@ -3,6 +3,7 @@
 package pgqueue
 
 import (
+	context "context"
 	fmt "fmt"
 	runtime "runtime"
 
@@ -20,7 +21,7 @@ import (
 // The Describe method is a shortcut to define this struct's fields in a
 // declarative manner.
 type DeliveryMocker struct {
-	Ack           func(a0 Ack)
+	Ack           func(a0 context.Context, a1 Ack)
 	UnwrapMessage func(into interface{}) (r0 error)
 }
 
@@ -70,7 +71,7 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 		for _, desc := range d.descriptors_Ack {
 			desc := desc
 			calls := 0
-			desc.call = func(a0 Ack) {
+			desc.call = func(a0 context.Context, a1 Ack) {
 				calls++
 			}
 			atAssert = append(atAssert, func() (method string, errs []string) {
@@ -81,11 +82,11 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 				return "", nil
 			})
 		}
-		d.m.Ack = func(a0 Ack) {
+		d.m.Ack = func(a0 context.Context, a1 Ack) {
 			var matching []*DeliveryAckMockDescriptor
 			var allErrs []specErrs
 			for _, desc := range d.descriptors_Ack {
-				errs := desc.argValidator(a0)
+				errs := desc.argValidator(a0, a1)
 				if len(errs) > 0 {
 					allErrs = append(allErrs, specErrs{desc.fileLine, errs})
 				} else {
@@ -93,11 +94,11 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 				}
 			}
 			if len(matching) == 1 {
-				matching[0].call(a0)
+				matching[0].call(a0, a1)
 				return
 			}
 			var args string
-			for i, arg := range []interface{}{a0} {
+			for i, arg := range []interface{}{a0, a1} {
 				if i != 0 {
 					args += "\n\t"
 				}
@@ -120,7 +121,7 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 			panic(fmt.Errorf("more than one candidate for call to mock for Delivery.Ack with args:\n\n\t%+v\n\nmatching candidates:\n%s", args, matchingLines))
 		}
 	} else {
-		d.m.Ack = func(a0 Ack) {
+		d.m.Ack = func(a0 context.Context, a1 Ack) {
 			panic("unexpected call to mock for Delivery.Ack")
 		}
 	}
@@ -211,7 +212,7 @@ func (d DeliveryMockDescriptor) newDeliveryAckMockDescriptor() *DeliveryAckMockD
 	return &DeliveryAckMockDescriptor{
 		mockDesc:     d,
 		times:        func(int) error { return nil },
-		argValidator: func(got_a0 Ack) []string { return nil },
+		argValidator: func(got_a0 context.Context, got_a1 Ack) []string { return nil },
 		fileLine:     fmt.Sprintf("%s:%d", file, line),
 	}
 }
@@ -221,8 +222,8 @@ func (d DeliveryMockDescriptor) newDeliveryAckMockDescriptor() *DeliveryAckMockD
 type DeliveryAckMockDescriptor struct {
 	mockDesc     DeliveryMockDescriptor
 	times        func(int) error
-	argValidator func(got_a0 Ack) []string
-	call         func(a0 Ack)
+	argValidator func(got_a0 context.Context, got_a1 Ack) []string
+	call         func(a0 context.Context, a1 Ack)
 	fileLine     string
 }
 
@@ -236,10 +237,10 @@ type DeliveryAckMockDescriptor struct {
 // If you want to accept any value, use TakesAny.
 //
 // If you want more complex validation logic, use TakesMatching.
-func (d *DeliveryAckMockDescriptor) Takes(a0 Ack, opts ...cmp.Option) DeliveryAckMockDescriptorWith1Arg {
+func (d *DeliveryAckMockDescriptor) Takes(a0 context.Context, opts ...cmp.Option) DeliveryAckMockDescriptorWith1Arg {
 	prev := d.argValidator
-	d.argValidator = func(got_a0 Ack) []string {
-		errMsgs := prev(got_a0)
+	d.argValidator = func(got_a0 context.Context, got_a1 Ack) []string {
+		errMsgs := prev(got_a0, got_a1)
 		if diff := cmp.Diff(a0, got_a0, opts...); diff != "" {
 			errMsgs = append(errMsgs, "parameter #1 mismatch:\n"+diff)
 		}
@@ -256,10 +257,10 @@ func (d *DeliveryAckMockDescriptor) TakesAny() DeliveryAckMockDescriptorWith1Arg
 
 // TakesMatching lets you pass a function to accept or reject the actual
 // value passed to the mocked method Delivery.Ack as parameter #1.
-func (d *DeliveryAckMockDescriptor) TakesMatching(match func(a0 Ack) error) DeliveryAckMockDescriptorWith1Arg {
+func (d *DeliveryAckMockDescriptor) TakesMatching(match func(a0 context.Context) error) DeliveryAckMockDescriptorWith1Arg {
 	prev := d.argValidator
-	d.argValidator = func(got_a0 Ack) []string {
-		errMsgs := prev(got_a0)
+	d.argValidator = func(got_a0 context.Context, got_a1 Ack) []string {
+		errMsgs := prev(got_a0, got_a1)
 		if err := match(got_a0); err != nil {
 			errMsgs = append(errMsgs, "parameter \"a0\" custom matcher error: "+err.Error())
 		}
@@ -279,9 +280,62 @@ type DeliveryAckMockDescriptorWith1Arg struct {
 	methodDesc *DeliveryAckMockDescriptor
 }
 
+// And lets you specify a value with which the actual value passed to
+// the mocked method Delivery.Ack as parameter #2
+// will be compared.
+//
+// Package "github.com/google/go-cmp/cmp" is used to do the comparison. You can
+// pass extra options for it.
+//
+// If you want to accept any value, use AndAny.
+//
+// If you want more complex validation logic, use AndMatching.
+func (d DeliveryAckMockDescriptorWith1Arg) And(a1 Ack, opts ...cmp.Option) DeliveryAckMockDescriptorWith2Args {
+	prev := d.methodDesc.argValidator
+	d.methodDesc.argValidator = func(got_a0 context.Context, got_a1 Ack) []string {
+		errMsgs := prev(got_a0, got_a1)
+		if diff := cmp.Diff(a1, got_a1, opts...); diff != "" {
+			errMsgs = append(errMsgs, "parameter #2 mismatch:\n"+diff)
+		}
+		return errMsgs
+	}
+	return DeliveryAckMockDescriptorWith2Args{d.methodDesc}
+}
+
+// AndAny declares that any value passed to the mocked method
+// Ack as parameter #2 is expected.
+func (d DeliveryAckMockDescriptorWith1Arg) AndAny() DeliveryAckMockDescriptorWith2Args {
+	return DeliveryAckMockDescriptorWith2Args{d.methodDesc}
+}
+
+// AndMatching lets you pass a function to accept or reject the actual
+// value passed to the mocked method Delivery.Ack as parameter #2.
+func (d DeliveryAckMockDescriptorWith1Arg) AndMatching(match func(a1 Ack) error) DeliveryAckMockDescriptorWith2Args {
+	prev := d.methodDesc.argValidator
+	d.methodDesc.argValidator = func(got_a0 context.Context, got_a1 Ack) []string {
+		errMsgs := prev(got_a0, got_a1)
+		if err := match(got_a1); err != nil {
+			errMsgs = append(errMsgs, "parameter \"a1\" custom matcher error: "+err.Error())
+		}
+		return errMsgs
+	}
+	return DeliveryAckMockDescriptorWith2Args{d.methodDesc}
+}
+
+// DeliveryAckMockDescriptorWith2Args is a step forward in the description of a way that the
+// method Delivery.Ack is expected to be called, with 2
+// arguments specified.
+//
+// It has methods to describe the next argument, if there's
+// any left, or the return values, if there are any, or the times it's expected
+// to be called otherwise.
+type DeliveryAckMockDescriptorWith2Args struct {
+	methodDesc *DeliveryAckMockDescriptor
+}
+
 // Times lets you specify a exact number of times this method is expected to be
 // called.
-func (d DeliveryAckMockDescriptorWith1Arg) Times(times int) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith2Args) Times(times int) DeliveryMockDescriptor {
 	return d.TimesMatching(func(got int) error {
 		if got != times {
 			return fmt.Errorf("expected exactly %d calls, got %d", times, got)
@@ -292,7 +346,7 @@ func (d DeliveryAckMockDescriptorWith1Arg) Times(times int) DeliveryMockDescript
 
 // AtLeastTimes lets you specify a minimum number of times this method is expected to be
 // called.
-func (d DeliveryAckMockDescriptorWith1Arg) AtLeastTimes(times int) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith2Args) AtLeastTimes(times int) DeliveryMockDescriptor {
 	return d.TimesMatching(func(got int) error {
 		if got < times {
 			return fmt.Errorf("expected at least %d calls, got %d", times, got)
@@ -303,7 +357,7 @@ func (d DeliveryAckMockDescriptorWith1Arg) AtLeastTimes(times int) DeliveryMockD
 
 // TimesMatching lets you pass a function to accept or reject the number of times
 // this method has been called.
-func (d DeliveryAckMockDescriptorWith1Arg) TimesMatching(f func(times int) error) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith2Args) TimesMatching(f func(times int) error) DeliveryMockDescriptor {
 	d.methodDesc.times = f
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc
@@ -312,7 +366,7 @@ func (d DeliveryAckMockDescriptorWith1Arg) TimesMatching(f func(times int) error
 // Mock finishes the description and produces a mock.
 //
 // See DeliveryMockDescriptor.Mock for details.
-func (d DeliveryAckMockDescriptorWith1Arg) Mock() (m DeliveryMock, assert func(t interface{ Errorf(string, ...interface{}) }) (ok bool)) {
+func (d DeliveryAckMockDescriptorWith2Args) Mock() (m DeliveryMock, assert func(t interface{ Errorf(string, ...interface{}) }) (ok bool)) {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.Mock()
 }
@@ -321,7 +375,7 @@ func (d DeliveryAckMockDescriptorWith1Arg) Mock() (m DeliveryMock, assert func(t
 // starts describing for method Ack.
 //
 // See DeliveryMockDescriptor.Ack for details.
-func (d DeliveryAckMockDescriptorWith1Arg) Ack() *DeliveryAckMockDescriptor {
+func (d DeliveryAckMockDescriptorWith2Args) Ack() *DeliveryAckMockDescriptor {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.newDeliveryAckMockDescriptor()
 }
@@ -330,7 +384,7 @@ func (d DeliveryAckMockDescriptorWith1Arg) Ack() *DeliveryAckMockDescriptor {
 // starts describing for method UnwrapMessage.
 //
 // See DeliveryMockDescriptor.UnwrapMessage for details.
-func (d DeliveryAckMockDescriptorWith1Arg) UnwrapMessage() *DeliveryUnwrapMessageMockDescriptor {
+func (d DeliveryAckMockDescriptorWith2Args) UnwrapMessage() *DeliveryUnwrapMessageMockDescriptor {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.newDeliveryUnwrapMessageMockDescriptor()
 }
@@ -521,8 +575,8 @@ type _makegomock_DeliveryMockFromMocker struct {
 	m *DeliveryMocker
 }
 
-func (m _makegomock_DeliveryMockFromMocker) Ack(a0 Ack) {
-	m.m.Ack(a0)
+func (m _makegomock_DeliveryMockFromMocker) Ack(a0 context.Context, a1 Ack) {
+	m.m.Ack(a0, a1)
 }
 
 func (m _makegomock_DeliveryMockFromMocker) UnwrapMessage(into interface{}) (r0 error) {
@@ -534,6 +588,6 @@ func (m _makegomock_DeliveryMockFromMocker) UnwrapMessage(into interface{}) (r0 
 // It is copied from the original just to avoid introducing a dependency on
 // Delivery's package.
 type DeliveryMock interface {
-	Ack(a0 Ack)
+	Ack(a0 context.Context, a1 Ack)
 	UnwrapMessage(into interface{}) (r0 error)
 }

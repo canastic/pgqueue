@@ -18,8 +18,8 @@ import (
 //
 // It depends on the provided SubscriptionDriver how message delivery for
 // concurrent consumers to the same subscription behaves.
-func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHandler) error, err error) {
-	err = driver.InsertSubscription()
+func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume func(context.Context, GetHandler) error, err error) {
+	err = driver.InsertSubscription(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -64,9 +64,10 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 }
 
 func handleDelivery(d Delivery, getHandler GetHandler) error {
+	ctx := context.Background()
 	ack := Requeue
 	defer func() {
-		d.Ack(ack)
+		d.Ack(ctx, ack)
 	}()
 
 	into, handle := getHandler()
@@ -76,7 +77,7 @@ func handleDelivery(d Delivery, getHandler GetHandler) error {
 		return err
 	}
 
-	ack = handle()
+	ctx, ack = handle(ctx)
 	return nil
 }
 
@@ -92,13 +93,13 @@ func handleDelivery(d Delivery, getHandler GetHandler) error {
 //
 // The handle function should return OK to acknowledge that the message has been
 // processed and should be removed from the queue, or Requeue otherwise.
-type GetHandler func() (unwrapInto interface{}, handle func() Ack)
+type GetHandler func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack))
 
 //go:generate make.go.mock -type SubscriptionDriver
 
 // A SubscriptionDriver is the abstract interface that
 type SubscriptionDriver interface {
-	InsertSubscription() error
+	InsertSubscription(context.Context) error
 	ListenForDeliveries(context.Context) (AcceptFunc, error)
 	FetchPendingDeliveries(context.Context, chan<- Delivery) error
 }
@@ -116,7 +117,7 @@ type Delivery interface {
 	// to be delivered again later if it's not.
 	//
 	// Ack is best-effort; the library's protocol doesn't care about it failing.
-	Ack(Ack)
+	Ack(context.Context, Ack)
 }
 
 type Ack bool

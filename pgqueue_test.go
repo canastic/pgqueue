@@ -24,7 +24,7 @@ func TestSubscribe(t *testing.T) {
 		}()
 
 		var err error
-		consumers[sub], err = Subscribe(d)
+		consumers[sub], err = Subscribe(context.Background(), d)
 		assert.Nil(t, err)
 	}
 
@@ -72,12 +72,12 @@ func TestSubscribe(t *testing.T) {
 		handled := make(chan testHandled)
 
 		stopConsumer := start(context.Background(), func(ctx context.Context) {
-			consumers[sub](ctx, func() (unwrapInto interface{}, handle func() Ack) {
+			consumers[sub](ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
 				var msg fakeMessage
-				return &msg, func() Ack {
+				return &msg, func(ctx context.Context) (context.Context, Ack) {
 					ack := make(chan Ack)
 					handled <- testHandled{msg.payload, ack}
-					return <-ack
+					return ctx, <-ack
 				}
 			})
 		})
@@ -117,11 +117,11 @@ func TestRequeueOnCrash(t *testing.T) {
 		chantest.AssertRecv(t, driver.insertSubscriptionCalls).(chan<- error) <- nil
 	}()
 
-	consumer, err := Subscribe(driver)
+	consumer, err := Subscribe(context.Background(), driver)
 	assert.Nil(t, err)
 
 	stopConsumer := start(context.Background(), func(ctx context.Context) {
-		err := consumer(ctx, func() (unwrapInto interface{}, handle func() Ack) {
+		err := consumer(ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
 			panic("oops")
 		})
 		assert.NotNil(t, err)
@@ -142,7 +142,7 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 
 	m := (&SubscriptionDriverMocker{}).Describe()
 
-	m = m.InsertSubscription().Returns(nil).Times(1)
+	m = m.InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (AcceptFunc, error) {
 		<-listenShouldReturn
@@ -160,13 +160,13 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 	driver, assertMock := m.Mock()
 	defer assertMock(t)
 
-	consume, err := Subscribe(driver)
+	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
 	stopConsuming := start(ctx, func(ctx context.Context) {
-		consume(ctx, func() (unwrapInto interface{}, handle func() Ack) {
+		consume(ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
 			panic("unexpected")
 		})
 	})
@@ -184,11 +184,11 @@ func TestErrorOnInsert(t *testing.T) {
 	expectedErr := errors.New("oops")
 
 	driver, assertMock := (&SubscriptionDriverMocker{}).Describe().
-		InsertSubscription().Returns(expectedErr).Times(1).
+		InsertSubscription().TakesAny().Returns(expectedErr).Times(1).
 		Mock()
 	defer assertMock(t)
 
-	_, err := Subscribe(driver)
+	_, err := Subscribe(context.Background(), driver)
 	assert.True(t, xerrors.Is(err, expectedErr), err)
 }
 
@@ -196,12 +196,12 @@ func TestErrorOnListen(t *testing.T) {
 	expectedErr := errors.New("oops")
 
 	driver, assertMock := (&SubscriptionDriverMocker{}).Describe().
-		InsertSubscription().Returns(nil).Times(1).
+		InsertSubscription().TakesAny().Returns(nil).Times(1).
 		ListenForDeliveries().TakesAny().Returns(nil, expectedErr).Times(1).
 		Mock()
 	defer assertMock(t)
 
-	consume, err := Subscribe(driver)
+	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
 	assert.True(t, xerrors.Is(err, expectedErr), err)
@@ -211,7 +211,7 @@ func TestErrorOnFetchPending(t *testing.T) {
 	expectedErr := errors.New("oops")
 
 	m := (&SubscriptionDriverMocker{}).Describe().
-		InsertSubscription().Returns(nil).Times(1)
+		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
 		<-ctx.Done()
@@ -223,7 +223,7 @@ func TestErrorOnFetchPending(t *testing.T) {
 	driver, assertMock := m.Mock()
 	defer assertMock(t)
 
-	consume, err := Subscribe(driver)
+	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
 	assert.True(t, xerrors.Is(err, expectedErr), err)
@@ -233,7 +233,7 @@ func TestErrorOnAccept(t *testing.T) {
 	expectedErr := errors.New("oops")
 
 	m := (&SubscriptionDriverMocker{}).Describe().
-		InsertSubscription().Returns(nil).Times(1)
+		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
 		return expectedErr
@@ -244,7 +244,7 @@ func TestErrorOnAccept(t *testing.T) {
 	driver, assertMock := m.Mock()
 	defer assertMock(t)
 
-	consume, err := Subscribe(driver)
+	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
 	assert.True(t, xerrors.Is(err, expectedErr), err)
@@ -254,12 +254,12 @@ func TestErrorOnUnwrap(t *testing.T) {
 	expectedErr := errors.New("oops")
 
 	m := (&SubscriptionDriverMocker{}).Describe().
-		InsertSubscription().Returns(nil).Times(1)
+		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
 		delivery, assertMock := (&DeliveryMocker{}).Describe().
 			UnwrapMessage().TakesAny().Returns(expectedErr).Times(1).
-			Ack().TakesAny().Times(1).
+			Ack().TakesAny().AndAny().Times(1).
 			Mock()
 		defer assertMock(t)
 
@@ -274,9 +274,9 @@ func TestErrorOnUnwrap(t *testing.T) {
 	driver, assertMock := m.Mock()
 	defer assertMock(t)
 
-	consume, err := Subscribe(driver)
+	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
-	err = consume(context.Background(), func() (unwrapInto interface{}, handle func() Ack) {
+	err = consume(context.Background(), func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
 		return nil, nil
 	})
 	assert.True(t, xerrors.Is(err, expectedErr), err)
@@ -313,7 +313,7 @@ func newTestSubscriptionDriver() *testSubscriptionDriver {
 	}
 }
 
-func (d *testSubscriptionDriver) InsertSubscription() error {
+func (d *testSubscriptionDriver) InsertSubscription(context.Context) error {
 	ch := make(chan error)
 	d.insertSubscriptionCalls <- ch
 	return <-ch
@@ -353,7 +353,7 @@ func (d testDelivery) UnwrapMessage(into interface{}) error {
 	return nil
 }
 
-func (d testDelivery) Ack(ack Ack) {
+func (d testDelivery) Ack(ctx context.Context, ack Ack) {
 	d.onAck <- msgWithAck{d.msg, ack}
 }
 

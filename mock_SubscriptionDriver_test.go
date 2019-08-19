@@ -22,7 +22,7 @@ import (
 // declarative manner.
 type SubscriptionDriverMocker struct {
 	FetchPendingDeliveries func(a0 context.Context, a1 chan<- Delivery) (r0 error)
-	InsertSubscription     func() (r0 error)
+	InsertSubscription     func(a0 context.Context) (r0 error)
 	ListenForDeliveries    func(a0 context.Context) (r0 AcceptFunc, r1 error)
 }
 
@@ -133,9 +133,9 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			desc := desc
 			calls := 0
 			prev := desc.call
-			desc.call = func() (r0 error) {
+			desc.call = func(a0 context.Context) (r0 error) {
 				calls++
-				return prev()
+				return prev(a0)
 			}
 			atAssert = append(atAssert, func() (method string, errs []string) {
 				err := desc.times(calls)
@@ -145,11 +145,11 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 				return "", nil
 			})
 		}
-		d.m.InsertSubscription = func() (r0 error) {
+		d.m.InsertSubscription = func(a0 context.Context) (r0 error) {
 			var matching []*SubscriptionDriverInsertSubscriptionMockDescriptor
 			var allErrs []specErrs
 			for _, desc := range d.descriptors_InsertSubscription {
-				errs := desc.argValidator()
+				errs := desc.argValidator(a0)
 				if len(errs) > 0 {
 					allErrs = append(allErrs, specErrs{desc.fileLine, errs})
 				} else {
@@ -157,10 +157,10 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 				}
 			}
 			if len(matching) == 1 {
-				return matching[0].call()
+				return matching[0].call(a0)
 			}
 			var args string
-			for i, arg := range []interface{}{} {
+			for i, arg := range []interface{}{a0} {
 				if i != 0 {
 					args += "\n\t"
 				}
@@ -183,7 +183,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			panic(fmt.Errorf("more than one candidate for call to mock for SubscriptionDriver.InsertSubscription with args:\n\n\t%+v\n\nmatching candidates:\n%s", args, matchingLines))
 		}
 	} else {
-		d.m.InsertSubscription = func() (r0 error) {
+		d.m.InsertSubscription = func(a0 context.Context) (r0 error) {
 			panic("unexpected call to mock for SubscriptionDriver.InsertSubscription")
 		}
 	}
@@ -506,7 +506,7 @@ func (d SubscriptionDriverMockDescriptor) newSubscriptionDriverInsertSubscriptio
 	return &SubscriptionDriverInsertSubscriptionMockDescriptor{
 		mockDesc:     d,
 		times:        func(int) error { return nil },
-		argValidator: func() []string { return nil },
+		argValidator: func(got_a0 context.Context) []string { return nil },
 		fileLine:     fmt.Sprintf("%s:%d", file, line),
 	}
 }
@@ -516,15 +516,68 @@ func (d SubscriptionDriverMockDescriptor) newSubscriptionDriverInsertSubscriptio
 type SubscriptionDriverInsertSubscriptionMockDescriptor struct {
 	mockDesc     SubscriptionDriverMockDescriptor
 	times        func(int) error
-	argValidator func() []string
-	call         func() (r0 error)
+	argValidator func(got_a0 context.Context) []string
+	call         func(a0 context.Context) (r0 error)
 	fileLine     string
+}
+
+// Takes lets you specify a value with which the actual value passed to
+// the mocked method SubscriptionDriver.InsertSubscription as parameter #1
+// will be compared.
+//
+// Package "github.com/google/go-cmp/cmp" is used to do the comparison. You can
+// pass extra options for it.
+//
+// If you want to accept any value, use TakesAny.
+//
+// If you want more complex validation logic, use TakesMatching.
+func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) Takes(a0 context.Context, opts ...cmp.Option) SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg {
+	prev := d.argValidator
+	d.argValidator = func(got_a0 context.Context) []string {
+		errMsgs := prev(got_a0)
+		if diff := cmp.Diff(a0, got_a0, opts...); diff != "" {
+			errMsgs = append(errMsgs, "parameter #1 mismatch:\n"+diff)
+		}
+		return errMsgs
+	}
+	return SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg{d}
+}
+
+// TakesAny declares that any value passed to the mocked method
+// InsertSubscription as parameter #1 is expected.
+func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) TakesAny() SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg {
+	return SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg{d}
+}
+
+// TakesMatching lets you pass a function to accept or reject the actual
+// value passed to the mocked method SubscriptionDriver.InsertSubscription as parameter #1.
+func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) TakesMatching(match func(a0 context.Context) error) SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg {
+	prev := d.argValidator
+	d.argValidator = func(got_a0 context.Context) []string {
+		errMsgs := prev(got_a0)
+		if err := match(got_a0); err != nil {
+			errMsgs = append(errMsgs, "parameter \"a0\" custom matcher error: "+err.Error())
+		}
+		return errMsgs
+	}
+	return SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg{d}
+}
+
+// SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg is a step forward in the description of a way that the
+// method SubscriptionDriver.InsertSubscription is expected to be called, with 1
+// arguments specified.
+//
+// It has methods to describe the next argument, if there's
+// any left, or the return values, if there are any, or the times it's expected
+// to be called otherwise.
+type SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg struct {
+	methodDesc *SubscriptionDriverInsertSubscriptionMockDescriptor
 }
 
 // Returns lets you specify the values that the mocked method SubscriptionDriver.InsertSubscription,
 // if called with values matching the expectations, will return.
-func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) Returns(r0 error) SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn {
-	return d.ReturnsFrom(func() error {
+func (d SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg) Returns(r0 error) SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn {
+	return d.ReturnsFrom(func(context.Context) error {
 		return r0
 	})
 }
@@ -533,9 +586,9 @@ func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) Returns(r0 error) S
 // if called with values matching the expectations, will return.
 //
 // It passes such passed values to a function that then returns the return values.
-func (d *SubscriptionDriverInsertSubscriptionMockDescriptor) ReturnsFrom(f func() (r0 error)) SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn {
-	d.call = f
-	return SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn{d}
+func (d SubscriptionDriverInsertSubscriptionMockDescriptorWith1Arg) ReturnsFrom(f func(a0 context.Context) (r0 error)) SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn {
+	d.methodDesc.call = f
+	return SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn{d.methodDesc}
 }
 
 // SubscriptionDriverInsertSubscriptionMockDescriptorWithReturn is a step forward in the description of a way that
@@ -814,8 +867,8 @@ func (m _makegomock_SubscriptionDriverMockFromMocker) FetchPendingDeliveries(a0 
 	return m.m.FetchPendingDeliveries(a0, a1)
 }
 
-func (m _makegomock_SubscriptionDriverMockFromMocker) InsertSubscription() (r0 error) {
-	return m.m.InsertSubscription()
+func (m _makegomock_SubscriptionDriverMockFromMocker) InsertSubscription(a0 context.Context) (r0 error) {
+	return m.m.InsertSubscription(a0)
 }
 
 func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 context.Context) (r0 AcceptFunc, r1 error) {
@@ -828,6 +881,6 @@ func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 con
 // SubscriptionDriver's package.
 type SubscriptionDriverMock interface {
 	FetchPendingDeliveries(a0 context.Context, a1 chan<- Delivery) (r0 error)
-	InsertSubscription() (r0 error)
+	InsertSubscription(a0 context.Context) (r0 error)
 	ListenForDeliveries(a0 context.Context) (r0 AcceptFunc, r1 error)
 }
