@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"github.com/tcard/gock"
 	"golang.org/x/xerrors"
 )
 
@@ -23,46 +24,37 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 		return nil, err
 	}
 
-	return func(ctx context.Context, getHandler GetHandler) error {
-		// Ensure we cancel the asynchronous accept call on panic.
-		ctx, cancel := context.WithCancel(ctx)
-		defer cancel()
+	return func(ctx context.Context, getHandler GetHandler) (err error) {
+		defer catchPanic(&err)
 
-		accept, err := driver.ListenForDeliveries(ctx)
+		acceptIncoming, err := driver.ListenForDeliveries(ctx)
 		if err != nil {
 			return xerrors.Errorf("listening for deliveries: %w", err)
 		}
 
-		consume := func(deliveries <-chan Delivery) error {
+		deliveries := make(chan Delivery)
+
+		ctx, cancel := context.WithCancel(ctx)
+
+		return gock.Wait(func() error {
+			defer cancel()
 			for d := range deliveries {
-				handleDelivery(d, getHandler)
+				err := handleDelivery(d, getHandler)
+				if err != nil {
+					return err
+				}
 			}
 			return nil
-		}
+		}, func() error {
+			defer close(deliveries)
 
-		asyncErr := make(chan error, 1)
+			err := driver.FetchPendingDeliveries(ctx, deliveries)
+			if err != nil {
+				return xerrors.Errorf("fetching pending deliveries: %w", err)
+			}
 
-		incoming := make(chan Delivery)
-		pending := make(chan Delivery)
-
-		goRecovering(asyncErr, func() error {
-			return accept(ctx, incoming)
+			return acceptIncoming(ctx, deliveries)
 		})
-
-		goRecovering(asyncErr, func() error {
-			return consume(pending)
-		})
-
-		err = driver.FetchPendingDeliveries(ctx, pending)
-		if err := <-asyncErr; err != nil {
-			return err
-		}
-
-		err = consume(incoming)
-		if err != nil {
-			return err
-		}
-		return <-asyncErr
 	}, nil
 }
 
@@ -96,6 +88,8 @@ func handleDelivery(d Delivery, getHandler GetHandler) error {
 // The handle function should return OK to acknowledge that the message has been
 // processed and should be removed from the queue, or Requeue otherwise.
 type GetHandler func() (unwrapInto interface{}, handle func() Ack)
+
+//go:generate make.go.mock -type SubscriptionDriver
 
 // A SubscriptionDriver is the abstract interface that
 type SubscriptionDriver interface {
@@ -153,15 +147,8 @@ func (p Panic) Unwrap() error {
 	}
 }
 
-func goRecovering(errCh chan<- error, f func() error) {
-	go func() {
-		var err error
-		defer func() {
-			if r := recover(); r != nil {
-				err = Panic{r, debug.Stack()}
-			}
-			errCh <- err
-		}()
-		err = f()
-	}()
+func catchPanic(err *error) {
+	if r := recover(); r != nil {
+		*err = Panic{r, debug.Stack()}
+	}
 }

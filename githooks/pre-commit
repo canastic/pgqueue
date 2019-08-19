@@ -2,6 +2,7 @@
 
 before=$(git diff --name-only)
 
+go generate ./...
 for f in $(find . -type f -name "*.go"); do
 	goimports -w $f
 done

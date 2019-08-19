@@ -134,6 +134,50 @@ func TestRequeueOnCrash(t *testing.T) {
 	chantest.Expect(t, stopConsumer)
 }
 
+func TestListenBeforeFetchingPending(t *testing.T) {
+	listenShouldReturn := make(chan struct{})
+	fetchCalled := make(chan struct{})
+
+	m := (&SubscriptionDriverMocker{}).Describe()
+
+	m = m.InsertSubscription().Returns(nil).Times(1)
+
+	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (func(context.Context, chan<- Delivery) error, error) {
+		<-listenShouldReturn
+		return func(ctx context.Context, _ chan<- Delivery) error {
+			<-ctx.Done()
+			return nil
+		}, nil
+	}).Times(1)
+
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().ReturnsFrom(func(context.Context, chan<- Delivery) error {
+		fetchCalled <- struct{}{}
+		return nil
+	}).Times(1)
+
+	driver, assertMock := m.Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(driver)
+	assert.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	stopConsuming := start(ctx, func(ctx context.Context) {
+		consume(ctx, func() (unwrapInto interface{}, handle func() Ack) {
+			panic("unexpected")
+		})
+	})
+
+	chantest.AssertNoRecv(t, fetchCalled)
+
+	listenShouldReturn <- struct{}{}
+	chantest.AssertRecv(t, fetchCalled)
+
+	cancel()
+	chantest.Expect(t, stopConsuming)
+}
+
 type fakeMessage struct {
 	payload string
 }
@@ -182,7 +226,6 @@ func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (func(
 }
 
 func (d *testSubscriptionDriver) forward(ctx context.Context, into chan<- Delivery, from <-chan msgWithAck) error {
-	defer close(into)
 	for {
 		select {
 		case <-ctx.Done():
