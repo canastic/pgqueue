@@ -124,7 +124,9 @@ func (ack Ack) String() string {
 	}
 }
 
-// A Panic is a panic captured as an error. It is returned by the
+// A Panic is a panic captured as an error. Is is returned by the consume
+// function returned by Subscribe when either the deliveries listener or the
+// provided handler panic.
 type Panic struct {
 	p     interface{}
 	stack []byte
@@ -132,6 +134,15 @@ type Panic struct {
 
 func (p Panic) Error() string {
 	return fmt.Sprintf("%v\n\n%s", p.p, p.stack)
+}
+
+func (p Panic) Unwrap() error {
+	switch err := p.p.(type) {
+	case error:
+		return err
+	default:
+		return nil
+	}
 }
 
 func goRecovering(errCh chan<- error, f func() error) {
