@@ -99,9 +99,11 @@ type GetHandler func() (unwrapInto interface{}, handle func() Ack)
 // A SubscriptionDriver is the abstract interface that
 type SubscriptionDriver interface {
 	InsertSubscription() error
-	ListenForDeliveries(context.Context) (accept func(context.Context, chan<- Delivery) error, err error)
+	ListenForDeliveries(context.Context) (AcceptFunc, error)
 	FetchPendingDeliveries(context.Context, chan<- Delivery) error
 }
+
+type AcceptFunc func(context.Context, chan<- Delivery) error
 
 //go:generate make.go.mock -type Delivery
 

@@ -144,7 +144,7 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 
 	m = m.InsertSubscription().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (func(context.Context, chan<- Delivery) error, error) {
+	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (AcceptFunc, error) {
 		<-listenShouldReturn
 		return func(ctx context.Context, _ chan<- Delivery) error {
 			<-ctx.Done()
@@ -323,7 +323,7 @@ func (d *testSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, del
 	return d.forward(ctx, deliveries, d.pending)
 }
 
-func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (func(context.Context, chan<- Delivery) error, error) {
+func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
 	return func(ctx context.Context, deliveries chan<- Delivery) error {
 		return d.forward(ctx, deliveries, d.incoming)
 	}, nil
