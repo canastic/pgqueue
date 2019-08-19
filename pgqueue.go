@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"runtime/debug"
+
+	"golang.org/x/xerrors"
 )
 
 // Subscribe creates a subscription and returns a function to consume from it.
@@ -22,9 +24,14 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 	}
 
 	return func(ctx context.Context, getHandler GetHandler) error {
-		// Ensure we cancel the asynchronous ListenForDeliveries call on panic.
+		// Ensure we cancel the asynchronous accept call on panic.
 		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+
+		accept, err := driver.ListenForDeliveries(ctx)
+		if err != nil {
+			return xerrors.Errorf("listening for deliveries: %w", err)
+		}
 
 		consume := func(deliveries <-chan Delivery) error {
 			for d := range deliveries {
@@ -39,13 +46,14 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 		pending := make(chan Delivery)
 
 		goRecovering(asyncErr, func() error {
-			return driver.ListenForDeliveries(ctx, incoming)
+			return accept(ctx, incoming)
 		})
 
 		goRecovering(asyncErr, func() error {
 			return consume(pending)
 		})
-		err := driver.FetchPendingDeliveries(ctx, pending)
+
+		err = driver.FetchPendingDeliveries(ctx, pending)
 		if err := <-asyncErr; err != nil {
 			return err
 		}
@@ -92,7 +100,7 @@ type GetHandler func() (unwrapInto interface{}, handle func() Ack)
 // A SubscriptionDriver is the abstract interface that
 type SubscriptionDriver interface {
 	InsertSubscription() error
-	ListenForDeliveries(context.Context, chan<- Delivery) error
+	ListenForDeliveries(context.Context) (accept func(context.Context, chan<- Delivery) error, err error)
 	FetchPendingDeliveries(context.Context, chan<- Delivery) error
 }
 

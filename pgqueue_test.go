@@ -175,8 +175,10 @@ func (d *testSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, del
 	return d.forward(ctx, deliveries, d.pending)
 }
 
-func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context, deliveries chan<- Delivery) error {
-	return d.forward(ctx, deliveries, d.incoming)
+func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (func(context.Context, chan<- Delivery) error, error) {
+	return func(ctx context.Context, deliveries chan<- Delivery) error {
+		return d.forward(ctx, deliveries, d.incoming)
+	}, nil
 }
 
 func (d *testSubscriptionDriver) forward(ctx context.Context, into chan<- Delivery, from <-chan msgWithAck) error {
