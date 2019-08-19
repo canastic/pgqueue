@@ -66,7 +66,7 @@ func Subscribe(driver SubscriptionDriver) (consume func(context.Context, GetHand
 func handleDelivery(d Delivery, getHandler GetHandler) error {
 	ack := Requeue
 	defer func() {
-		_ = d.Ack(ack)
+		d.Ack(ack)
 	}()
 
 	into, handle := getHandler()
@@ -112,7 +112,9 @@ type Delivery interface {
 	UnwrapMessage(into interface{}) error
 	// Ack should remove the message from the queue if it's OK, or release it
 	// to be delivered again later if it's not.
-	Ack(Ack) error
+	//
+	// Ack is best-effort; the library's protocol doesn't care about it failing.
+	Ack(Ack)
 }
 
 type Ack bool

@@ -20,7 +20,7 @@ import (
 // The Describe method is a shortcut to define this struct's fields in a
 // declarative manner.
 type DeliveryMocker struct {
-	Ack           func(a0 Ack) (r0 error)
+	Ack           func(a0 Ack)
 	UnwrapMessage func(into interface{}) (r0 error)
 }
 
@@ -70,10 +70,8 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 		for _, desc := range d.descriptors_Ack {
 			desc := desc
 			calls := 0
-			prev := desc.call
-			desc.call = func(a0 Ack) (r0 error) {
+			desc.call = func(a0 Ack) {
 				calls++
-				return prev(a0)
 			}
 			atAssert = append(atAssert, func() (method string, errs []string) {
 				err := desc.times(calls)
@@ -83,7 +81,7 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 				return "", nil
 			})
 		}
-		d.m.Ack = func(a0 Ack) (r0 error) {
+		d.m.Ack = func(a0 Ack) {
 			var matching []*DeliveryAckMockDescriptor
 			var allErrs []specErrs
 			for _, desc := range d.descriptors_Ack {
@@ -95,7 +93,8 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 				}
 			}
 			if len(matching) == 1 {
-				return matching[0].call(a0)
+				matching[0].call(a0)
+				return
 			}
 			var args string
 			for i, arg := range []interface{}{a0} {
@@ -121,7 +120,7 @@ func (d DeliveryMockDescriptor) done() func(t interface {
 			panic(fmt.Errorf("more than one candidate for call to mock for Delivery.Ack with args:\n\n\t%+v\n\nmatching candidates:\n%s", args, matchingLines))
 		}
 	} else {
-		d.m.Ack = func(a0 Ack) (r0 error) {
+		d.m.Ack = func(a0 Ack) {
 			panic("unexpected call to mock for Delivery.Ack")
 		}
 	}
@@ -223,7 +222,7 @@ type DeliveryAckMockDescriptor struct {
 	mockDesc     DeliveryMockDescriptor
 	times        func(int) error
 	argValidator func(got_a0 Ack) []string
-	call         func(a0 Ack) (r0 error)
+	call         func(a0 Ack)
 	fileLine     string
 }
 
@@ -280,38 +279,9 @@ type DeliveryAckMockDescriptorWith1Arg struct {
 	methodDesc *DeliveryAckMockDescriptor
 }
 
-// Returns lets you specify the values that the mocked method Delivery.Ack,
-// if called with values matching the expectations, will return.
-func (d DeliveryAckMockDescriptorWith1Arg) Returns(r0 error) DeliveryAckMockDescriptorWithReturn {
-	return d.ReturnsFrom(func(Ack) error {
-		return r0
-	})
-}
-
-// Returns lets you specify the values that the mocked method Delivery.Ack,
-// if called with values matching the expectations, will return.
-//
-// It passes such passed values to a function that then returns the return values.
-func (d DeliveryAckMockDescriptorWith1Arg) ReturnsFrom(f func(a0 Ack) (r0 error)) DeliveryAckMockDescriptorWithReturn {
-	d.methodDesc.call = f
-	return DeliveryAckMockDescriptorWithReturn{d.methodDesc}
-}
-
-// DeliveryAckMockDescriptorWithReturn is a step forward in the description of a way that
-// method Delivery.Ack is to behave when called, with all expected parameters
-// and the resulting values specified.
-// arguments specified.
-//
-// It has methods to describe the times the method is expected to be called,
-// or you can start another method call description, or you can call Mock to
-// end the description and get the resulting mock.
-type DeliveryAckMockDescriptorWithReturn struct {
-	methodDesc *DeliveryAckMockDescriptor
-}
-
 // Times lets you specify a exact number of times this method is expected to be
 // called.
-func (d DeliveryAckMockDescriptorWithReturn) Times(times int) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith1Arg) Times(times int) DeliveryMockDescriptor {
 	return d.TimesMatching(func(got int) error {
 		if got != times {
 			return fmt.Errorf("expected exactly %d calls, got %d", times, got)
@@ -322,7 +292,7 @@ func (d DeliveryAckMockDescriptorWithReturn) Times(times int) DeliveryMockDescri
 
 // AtLeastTimes lets you specify a minimum number of times this method is expected to be
 // called.
-func (d DeliveryAckMockDescriptorWithReturn) AtLeastTimes(times int) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith1Arg) AtLeastTimes(times int) DeliveryMockDescriptor {
 	return d.TimesMatching(func(got int) error {
 		if got < times {
 			return fmt.Errorf("expected at least %d calls, got %d", times, got)
@@ -333,7 +303,7 @@ func (d DeliveryAckMockDescriptorWithReturn) AtLeastTimes(times int) DeliveryMoc
 
 // TimesMatching lets you pass a function to accept or reject the number of times
 // this method has been called.
-func (d DeliveryAckMockDescriptorWithReturn) TimesMatching(f func(times int) error) DeliveryMockDescriptor {
+func (d DeliveryAckMockDescriptorWith1Arg) TimesMatching(f func(times int) error) DeliveryMockDescriptor {
 	d.methodDesc.times = f
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc
@@ -342,7 +312,7 @@ func (d DeliveryAckMockDescriptorWithReturn) TimesMatching(f func(times int) err
 // Mock finishes the description and produces a mock.
 //
 // See DeliveryMockDescriptor.Mock for details.
-func (d DeliveryAckMockDescriptorWithReturn) Mock() (m DeliveryMock, assert func(t interface{ Errorf(string, ...interface{}) }) (ok bool)) {
+func (d DeliveryAckMockDescriptorWith1Arg) Mock() (m DeliveryMock, assert func(t interface{ Errorf(string, ...interface{}) }) (ok bool)) {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.Mock()
 }
@@ -351,7 +321,7 @@ func (d DeliveryAckMockDescriptorWithReturn) Mock() (m DeliveryMock, assert func
 // starts describing for method Ack.
 //
 // See DeliveryMockDescriptor.Ack for details.
-func (d DeliveryAckMockDescriptorWithReturn) Ack() *DeliveryAckMockDescriptor {
+func (d DeliveryAckMockDescriptorWith1Arg) Ack() *DeliveryAckMockDescriptor {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.newDeliveryAckMockDescriptor()
 }
@@ -360,7 +330,7 @@ func (d DeliveryAckMockDescriptorWithReturn) Ack() *DeliveryAckMockDescriptor {
 // starts describing for method UnwrapMessage.
 //
 // See DeliveryMockDescriptor.UnwrapMessage for details.
-func (d DeliveryAckMockDescriptorWithReturn) UnwrapMessage() *DeliveryUnwrapMessageMockDescriptor {
+func (d DeliveryAckMockDescriptorWith1Arg) UnwrapMessage() *DeliveryUnwrapMessageMockDescriptor {
 	d.methodDesc.done()
 	return d.methodDesc.mockDesc.newDeliveryUnwrapMessageMockDescriptor()
 }
@@ -551,8 +521,8 @@ type _makegomock_DeliveryMockFromMocker struct {
 	m *DeliveryMocker
 }
 
-func (m _makegomock_DeliveryMockFromMocker) Ack(a0 Ack) (r0 error) {
-	return m.m.Ack(a0)
+func (m _makegomock_DeliveryMockFromMocker) Ack(a0 Ack) {
+	m.m.Ack(a0)
 }
 
 func (m _makegomock_DeliveryMockFromMocker) UnwrapMessage(into interface{}) (r0 error) {
@@ -564,6 +534,6 @@ func (m _makegomock_DeliveryMockFromMocker) UnwrapMessage(into interface{}) (r0 
 // It is copied from the original just to avoid introducing a dependency on
 // Delivery's package.
 type DeliveryMock interface {
-	Ack(a0 Ack) (r0 error)
+	Ack(a0 Ack)
 	UnwrapMessage(into interface{}) (r0 error)
 }

@@ -259,7 +259,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
 		delivery, assertMock := (&DeliveryMocker{}).Describe().
 			UnwrapMessage().TakesAny().Returns(expectedErr).Times(1).
-			Ack().TakesAny().Returns(nil).Times(1).
+			Ack().TakesAny().Times(1).
 			Mock()
 		defer assertMock(t)
 
@@ -353,9 +353,8 @@ func (d testDelivery) UnwrapMessage(into interface{}) error {
 	return nil
 }
 
-func (d testDelivery) Ack(ack Ack) error {
+func (d testDelivery) Ack(ack Ack) {
 	d.onAck <- msgWithAck{d.msg, ack}
-	return nil
 }
 
 func start(ctx context.Context, f func(context.Context)) (stop func()) {
