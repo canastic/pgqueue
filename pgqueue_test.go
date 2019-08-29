@@ -257,9 +257,9 @@ func TestErrorOnUnwrap(t *testing.T) {
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
-		okCalled := 0
+		requeueCalled := 0
 		defer func() {
-			assert.Equal(t, 1, okCalled)
+			assert.Equal(t, 1, requeueCalled)
 		}()
 
 		deliveries <- Delivery{
@@ -267,7 +267,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 				return expectedErr
 			},
 			Requeue: func(context.Context) {
-				okCalled++
+				requeueCalled++
 			},
 		}
 
