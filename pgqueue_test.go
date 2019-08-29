@@ -36,23 +36,22 @@ func TestSubscribe(t *testing.T) {
 	type op struct {
 		sub    string
 		source opSource
-		ack    Ack
 		msg    string
 	}
 
 	ops := []*op{
-		{"subA", opSourceIncoming, OK, ""},
-		{"subA", opSourcePending, Requeue, ""},
-		{"subB", opSourcePending, Requeue, ""},
-		{"subB", opSourceIncoming, OK, ""},
-		{"subB", opSourceIncoming, OK, ""},
-		{"subA", opSourcePending, Requeue, ""},
-		{"subB", opSourceIncoming, Requeue, ""},
-		{"subB", opSourcePending, OK, ""},
+		{"subA", opSourceIncoming, ""},
+		{"subA", opSourcePending, ""},
+		{"subB", opSourcePending, ""},
+		{"subB", opSourceIncoming, ""},
+		{"subB", opSourceIncoming, ""},
+		{"subA", opSourcePending, ""},
+		{"subB", opSourceIncoming, ""},
+		{"subB", opSourcePending, ""},
 	}
 
 	for i, op := range ops {
-		op.msg = fmt.Sprintf("msg %d -> %s.%s (%v)", i, op.sub, op.source, op.ack)
+		op.msg = fmt.Sprintf("msg %d -> %s.%s", i, op.sub, op.source)
 
 		var src chan msgWithAck
 
@@ -65,7 +64,7 @@ func TestSubscribe(t *testing.T) {
 			panic(op.source)
 		}
 
-		src <- msgWithAck{op.msg, op.ack}
+		src <- msgWithAck{op.msg, OK}
 	}
 
 	for _, sub := range []string{"subA", "subB"} {
@@ -85,11 +84,11 @@ func TestSubscribe(t *testing.T) {
 		doOp := func(op *op) {
 			h := chantest.AssertRecv(t, handled).(testHandled)
 			assert.Equal(t, op.msg, h.msg)
-			chantest.AssertSend(t, h.ack, op.ack)
+			chantest.AssertSend(t, h.ack, OK)
 
 			acked := chantest.AssertRecv(t, drivers[sub].acks).(msgWithAck)
 			assert.Equal(t, h.msg, acked.msg)
-			assert.Equal(t, op.ack, acked.ack)
+			assert.Equal(t, OK, acked.ack)
 		}
 
 		for _, op := range ops {
@@ -266,8 +265,9 @@ func TestErrorOnUnwrap(t *testing.T) {
 			Unwrap: func(interface{}) error {
 				return expectedErr
 			},
-			Requeue: func(context.Context) {
+			Requeue: func(context.Context) error {
 				requeueCalled++
+				return nil
 			},
 		}
 
@@ -286,6 +286,108 @@ func TestErrorOnUnwrap(t *testing.T) {
 		return nil, nil
 	})
 	assert.True(t, xerrors.Is(err, expectedErr), err)
+}
+
+func TestErrorOnAckError(t *testing.T) {
+	run := func(t *testing.T, ack Ack, unwrapErr bool) {
+		t.Helper()
+
+		oops := errors.New("oops")
+		ackErr := errors.New("ack error")
+
+		d := Delivery{}
+
+		expectedErr := ackErr
+		if unwrapErr {
+			expectedErr = oops
+			d.Unwrap = func(interface{}) error { return oops }
+		} else {
+			d.Unwrap = func(interface{}) error { return nil }
+		}
+
+		ackCalled := 0
+		defer func() {
+			assert.Equal(t, 1, ackCalled)
+		}()
+		ackFunc := func(context.Context) error {
+			ackCalled++
+			return ackErr
+		}
+		if ack == OK && !unwrapErr {
+			d.OK = ackFunc
+		} else {
+			d.Requeue = ackFunc
+		}
+
+		m := (&SubscriptionDriverMocker{}).Describe().
+			InsertSubscription().TakesAny().Returns(nil).Times(1)
+
+		m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+			deliveries <- d
+			<-ctx.Done()
+			return nil
+		}, nil).Times(1)
+
+		m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
+
+		driver, assertMock := m.Mock()
+		defer assertMock(t)
+
+		consume, err := Subscribe(context.Background(), driver)
+		assert.NoError(t, err)
+		err = consume(context.Background(), func() (unwrapInto interface{}, handle HandleFunc) {
+			return nil, func(ctx context.Context) (context.Context, Ack) {
+				return ctx, ack
+			}
+		})
+		assert.True(t, xerrors.Is(err, expectedErr), err)
+	}
+
+	for _, ack := range []Ack{OK, Requeue} {
+		for _, unwrapErr := range []bool{false, true} {
+			t.Run(fmt.Sprintf("ok=%v;unwrapErr=%v", ack, unwrapErr), func(t *testing.T) {
+				run(t, ack, unwrapErr)
+			})
+		}
+	}
+}
+
+func ErrorOnRequeue(t *testing.T) {
+	m := (&SubscriptionDriverMocker{}).Describe().
+		InsertSubscription().TakesAny().Returns(nil).Times(1)
+
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+		requeueCalled := 0
+		defer func() {
+			assert.Equal(t, 1, requeueCalled)
+		}()
+
+		deliveries <- Delivery{
+			Unwrap: func(interface{}) error {
+				return nil
+			},
+			Requeue: func(context.Context) error {
+				requeueCalled++
+				return nil
+			},
+		}
+		<-ctx.Done()
+		return nil
+	}, nil).Times(1)
+
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
+
+	driver, assertMock := m.Mock()
+	defer assertMock(t)
+
+	consume, err := Subscribe(context.Background(), driver)
+	assert.NoError(t, err)
+	err = consume(context.Background(), func() (unwrapInto interface{}, handle HandleFunc) {
+		return nil, func(ctx context.Context) (context.Context, Ack) {
+			return ctx, Requeue
+		}
+	})
+	assert.True(t, xerrors.Is(err, ErrRequeued), err)
 }
 
 type fakeMessage struct {
@@ -355,11 +457,13 @@ func testDelivery(msg string, onAck chan<- msgWithAck) Delivery {
 			into.(*fakeMessage).payload = msg
 			return nil
 		},
-		OK: func(ctx context.Context) {
+		OK: func(ctx context.Context) error {
 			onAck <- msgWithAck{msg, OK}
+			return nil
 		},
-		Requeue: func(ctx context.Context) {
+		Requeue: func(ctx context.Context) error {
 			onAck <- msgWithAck{msg, Requeue}
+			return nil
 		},
 	}
 }

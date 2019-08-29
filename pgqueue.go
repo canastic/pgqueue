@@ -4,6 +4,7 @@ package pgqueue
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 
@@ -65,16 +66,28 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 
 type ConsumeFunc = func(context.Context, GetHandler) error
 
-func handleDelivery(d Delivery, getHandler GetHandler) error {
+var ErrRequeued = errors.New("a message was requeued; redelivery not guaranteed unless consuming starts again")
+
+func handleDelivery(d Delivery, getHandler GetHandler) (err error) {
 	ctx := context.Background()
 	ack := Requeue
 	defer func() {
-		d.Ack(ctx, ack)
+		ackErr := d.Ack(ctx, ack)
+
+		if ackErr == nil && ack == Requeue {
+			ackErr = ErrRequeued
+		}
+
+		// If there was an error already, ack is best-effort. The important
+		// thing here is that we return some error so the ConsumeFunc stops.
+		if err == nil {
+			err = ackErr
+		}
 	}()
 
 	into, handle := getHandler()
 
-	err := d.Unwrap(into)
+	err = d.Unwrap(into)
 	if err != nil {
 		return err
 	}
@@ -115,16 +128,16 @@ type Delivery struct {
 	// Unwrap unwraps the delivery as it comes from the queue into a value
 	// that a handler can use.
 	Unwrap  func(into interface{}) error
-	OK      func(context.Context)
-	Requeue func(context.Context)
+	OK      func(context.Context) error
+	Requeue func(context.Context) error
 }
 
-func (d Delivery) Ack(ctx context.Context, ack Ack) {
+func (d Delivery) Ack(ctx context.Context, ack Ack) error {
 	switch ack {
 	case OK:
-		d.OK(ctx)
+		return d.OK(ctx)
 	case Requeue:
-		d.Requeue(ctx)
+		return d.Requeue(ctx)
 	default:
 		panic(fmt.Errorf("unknown value for Ack: %v", bool(ack)))
 	}
