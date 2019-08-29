@@ -18,7 +18,7 @@ import (
 //
 // It depends on the provided SubscriptionDriver how message delivery for
 // concurrent consumers to the same subscription behaves.
-func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume func(context.Context, GetHandler) error, err error) {
+func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeFunc, err error) {
 	err = driver.InsertSubscription(ctx)
 	if err != nil {
 		return nil, err
@@ -63,6 +63,8 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume func(con
 	}, nil
 }
 
+type ConsumeFunc = func(context.Context, GetHandler) error
+
 func handleDelivery(d Delivery, getHandler GetHandler) error {
 	ctx := context.Background()
 	ack := Requeue
@@ -93,7 +95,9 @@ func handleDelivery(d Delivery, getHandler GetHandler) error {
 //
 // The handle function should return OK to acknowledge that the message has been
 // processed and should be removed from the queue, or Requeue otherwise.
-type GetHandler func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack))
+type GetHandler = func() (unwrapInto interface{}, handle HandleFunc)
+
+type HandleFunc = func(context.Context) (context.Context, Ack)
 
 //go:generate make.go.mock -type SubscriptionDriver
 
