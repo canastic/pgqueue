@@ -72,7 +72,7 @@ func handleDelivery(d Delivery, getHandler GetHandler) error {
 
 	into, handle := getHandler()
 
-	err := d.UnwrapMessage(into)
+	err := d.Unwrap(into)
 	if err != nil {
 		return err
 	}
@@ -106,18 +106,24 @@ type SubscriptionDriver interface {
 
 type AcceptFunc func(context.Context, chan<- Delivery) error
 
-//go:generate make.go.mock -type Delivery
-
 // A Delivery is an attempted delivery of a message.
-type Delivery interface {
-	// UnwrapMessage unwraps the message as it comes from the queue into a value
+type Delivery struct {
+	// Unwrap unwraps the delivery as it comes from the queue into a value
 	// that a handler can use.
-	UnwrapMessage(into interface{}) error
-	// Ack should remove the message from the queue if it's OK, or release it
-	// to be delivered again later if it's not.
-	//
-	// Ack is best-effort; the library's protocol doesn't care about it failing.
-	Ack(context.Context, Ack)
+	Unwrap  func(into interface{}) error
+	OK      func(context.Context)
+	Requeue func(context.Context)
+}
+
+func (d Delivery) Ack(ctx context.Context, ack Ack) {
+	switch ack {
+	case OK:
+		d.OK(ctx)
+	case Requeue:
+		d.Requeue(ctx)
+	default:
+		panic(fmt.Errorf("unknown value for Ack: %v", bool(ack)))
+	}
 }
 
 type Ack bool

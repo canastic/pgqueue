@@ -257,13 +257,19 @@ func TestErrorOnUnwrap(t *testing.T) {
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
-		delivery, assertMock := (&DeliveryMocker{}).Describe().
-			UnwrapMessage().TakesAny().Returns(expectedErr).Times(1).
-			Ack().TakesAny().AndAny().Times(1).
-			Mock()
-		defer assertMock(t)
+		okCalled := 0
+		defer func() {
+			assert.Equal(t, 1, okCalled)
+		}()
 
-		deliveries <- delivery
+		deliveries <- Delivery{
+			Unwrap: func(interface{}) error {
+				return expectedErr
+			},
+			Requeue: func(context.Context) {
+				okCalled++
+			},
+		}
 
 		<-ctx.Done()
 		return nil
@@ -338,23 +344,24 @@ func (d *testSubscriptionDriver) forward(ctx context.Context, into chan<- Delive
 			if !ok {
 				return nil
 			}
-			into <- testDelivery{del.msg, d.acks}
+			into <- testDelivery(del.msg, d.acks)
 		}
 	}
 }
 
-type testDelivery struct {
-	msg   string
-	onAck chan<- msgWithAck
-}
-
-func (d testDelivery) UnwrapMessage(into interface{}) error {
-	into.(*fakeMessage).payload = d.msg
-	return nil
-}
-
-func (d testDelivery) Ack(ctx context.Context, ack Ack) {
-	d.onAck <- msgWithAck{d.msg, ack}
+func testDelivery(msg string, onAck chan<- msgWithAck) Delivery {
+	return Delivery{
+		Unwrap: func(into interface{}) error {
+			into.(*fakeMessage).payload = msg
+			return nil
+		},
+		OK: func(ctx context.Context) {
+			onAck <- msgWithAck{msg, OK}
+		},
+		Requeue: func(ctx context.Context) {
+			onAck <- msgWithAck{msg, Requeue}
+		},
+	}
 }
 
 func start(ctx context.Context, f func(context.Context)) (stop func()) {
