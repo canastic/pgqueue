@@ -72,7 +72,7 @@ func TestSubscribe(t *testing.T) {
 		handled := make(chan testHandled)
 
 		stopConsumer := start(context.Background(), func(ctx context.Context) {
-			consumers[sub](ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
+			consumers[sub](ctx, func() (unwrapInto interface{}, handle HandleFunc) {
 				var msg fakeMessage
 				return &msg, func(ctx context.Context) (context.Context, Ack) {
 					ack := make(chan Ack)
@@ -121,7 +121,7 @@ func TestRequeueOnCrash(t *testing.T) {
 	assert.Nil(t, err)
 
 	stopConsumer := start(context.Background(), func(ctx context.Context) {
-		err := consumer(ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
+		err := consumer(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
 			panic("oops")
 		})
 		assert.NotNil(t, err)
@@ -166,7 +166,7 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	stopConsuming := start(ctx, func(ctx context.Context) {
-		consume(ctx, func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
+		consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
 			panic("unexpected")
 		})
 	})
@@ -282,7 +282,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 
 	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
-	err = consume(context.Background(), func() (unwrapInto interface{}, handle func(context.Context) (context.Context, Ack)) {
+	err = consume(context.Background(), func() (unwrapInto interface{}, handle HandleFunc) {
 		return nil, nil
 	})
 	assert.True(t, xerrors.Is(err, expectedErr), err)
