@@ -8,6 +8,7 @@ import (
 	runtime "runtime"
 
 	cmp "github.com/google/go-cmp/cmp"
+	stopcontext "gitlab.com/canastic/pgqueue/stopcontext"
 )
 
 // SubscriptionDriverMocker builds mocks for type SubscriptionDriver.
@@ -21,7 +22,7 @@ import (
 // The Describe method is a shortcut to define this struct's fields in a
 // declarative manner.
 type SubscriptionDriverMocker struct {
-	FetchPendingDeliveries func(a0 context.Context, a1 chan<- Delivery) (r0 error)
+	FetchPendingDeliveries func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)
 	InsertSubscription     func(a0 context.Context) (r0 error)
 	ListenForDeliveries    func(a0 context.Context) (r0 AcceptFunc, r1 error)
 }
@@ -74,7 +75,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			desc := desc
 			calls := 0
 			prev := desc.call
-			desc.call = func(a0 context.Context, a1 chan<- Delivery) (r0 error) {
+			desc.call = func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error) {
 				calls++
 				return prev(a0, a1)
 			}
@@ -86,7 +87,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 				return "", nil
 			})
 		}
-		d.m.FetchPendingDeliveries = func(a0 context.Context, a1 chan<- Delivery) (r0 error) {
+		d.m.FetchPendingDeliveries = func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error) {
 			var matching []*SubscriptionDriverFetchPendingDeliveriesMockDescriptor
 			var allErrs []specErrs
 			for _, desc := range d.descriptors_FetchPendingDeliveries {
@@ -124,7 +125,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			panic(fmt.Errorf("more than one candidate for call to mock for SubscriptionDriver.FetchPendingDeliveries with args:\n\n\t%+v\n\nmatching candidates:\n%s", args, matchingLines))
 		}
 	} else {
-		d.m.FetchPendingDeliveries = func(a0 context.Context, a1 chan<- Delivery) (r0 error) {
+		d.m.FetchPendingDeliveries = func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error) {
 			panic("unexpected call to mock for SubscriptionDriver.FetchPendingDeliveries")
 		}
 	}
@@ -274,7 +275,7 @@ func (d SubscriptionDriverMockDescriptor) newSubscriptionDriverFetchPendingDeliv
 	return &SubscriptionDriverFetchPendingDeliveriesMockDescriptor{
 		mockDesc:     d,
 		times:        func(int) error { return nil },
-		argValidator: func(got_a0 context.Context, got_a1 chan<- Delivery) []string { return nil },
+		argValidator: func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string { return nil },
 		fileLine:     fmt.Sprintf("%s:%d", file, line),
 	}
 }
@@ -284,8 +285,8 @@ func (d SubscriptionDriverMockDescriptor) newSubscriptionDriverFetchPendingDeliv
 type SubscriptionDriverFetchPendingDeliveriesMockDescriptor struct {
 	mockDesc     SubscriptionDriverMockDescriptor
 	times        func(int) error
-	argValidator func(got_a0 context.Context, got_a1 chan<- Delivery) []string
-	call         func(a0 context.Context, a1 chan<- Delivery) (r0 error)
+	argValidator func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string
+	call         func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)
 	fileLine     string
 }
 
@@ -299,9 +300,9 @@ type SubscriptionDriverFetchPendingDeliveriesMockDescriptor struct {
 // If you want to accept any value, use TakesAny.
 //
 // If you want more complex validation logic, use TakesMatching.
-func (d *SubscriptionDriverFetchPendingDeliveriesMockDescriptor) Takes(a0 context.Context, opts ...cmp.Option) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg {
+func (d *SubscriptionDriverFetchPendingDeliveriesMockDescriptor) Takes(a0 stopcontext.Context, opts ...cmp.Option) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg {
 	prev := d.argValidator
-	d.argValidator = func(got_a0 context.Context, got_a1 chan<- Delivery) []string {
+	d.argValidator = func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string {
 		errMsgs := prev(got_a0, got_a1)
 		if diff := cmp.Diff(a0, got_a0, opts...); diff != "" {
 			errMsgs = append(errMsgs, "parameter #1 mismatch:\n"+diff)
@@ -319,9 +320,9 @@ func (d *SubscriptionDriverFetchPendingDeliveriesMockDescriptor) TakesAny() Subs
 
 // TakesMatching lets you pass a function to accept or reject the actual
 // value passed to the mocked method SubscriptionDriver.FetchPendingDeliveries as parameter #1.
-func (d *SubscriptionDriverFetchPendingDeliveriesMockDescriptor) TakesMatching(match func(a0 context.Context) error) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg {
+func (d *SubscriptionDriverFetchPendingDeliveriesMockDescriptor) TakesMatching(match func(a0 stopcontext.Context) error) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg {
 	prev := d.argValidator
-	d.argValidator = func(got_a0 context.Context, got_a1 chan<- Delivery) []string {
+	d.argValidator = func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string {
 		errMsgs := prev(got_a0, got_a1)
 		if err := match(got_a0); err != nil {
 			errMsgs = append(errMsgs, "parameter \"a0\" custom matcher error: "+err.Error())
@@ -354,7 +355,7 @@ type SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg struct {
 // If you want more complex validation logic, use AndMatching.
 func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg) And(a1 chan<- Delivery, opts ...cmp.Option) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args {
 	prev := d.methodDesc.argValidator
-	d.methodDesc.argValidator = func(got_a0 context.Context, got_a1 chan<- Delivery) []string {
+	d.methodDesc.argValidator = func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string {
 		errMsgs := prev(got_a0, got_a1)
 		if diff := cmp.Diff(a1, got_a1, opts...); diff != "" {
 			errMsgs = append(errMsgs, "parameter #2 mismatch:\n"+diff)
@@ -374,7 +375,7 @@ func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg) AndAny()
 // value passed to the mocked method SubscriptionDriver.FetchPendingDeliveries as parameter #2.
 func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith1Arg) AndMatching(match func(a1 chan<- Delivery) error) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args {
 	prev := d.methodDesc.argValidator
-	d.methodDesc.argValidator = func(got_a0 context.Context, got_a1 chan<- Delivery) []string {
+	d.methodDesc.argValidator = func(got_a0 stopcontext.Context, got_a1 chan<- Delivery) []string {
 		errMsgs := prev(got_a0, got_a1)
 		if err := match(got_a1); err != nil {
 			errMsgs = append(errMsgs, "parameter \"a1\" custom matcher error: "+err.Error())
@@ -398,7 +399,7 @@ type SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args struct {
 // Returns lets you specify the values that the mocked method SubscriptionDriver.FetchPendingDeliveries,
 // if called with values matching the expectations, will return.
 func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args) Returns(r0 error) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWithReturn {
-	return d.ReturnsFrom(func(context.Context, chan<- Delivery) error {
+	return d.ReturnsFrom(func(stopcontext.Context, chan<- Delivery) error {
 		return r0
 	})
 }
@@ -407,7 +408,7 @@ func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args) Returns
 // if called with values matching the expectations, will return.
 //
 // It passes such passed values to a function that then returns the return values.
-func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args) ReturnsFrom(f func(a0 context.Context, a1 chan<- Delivery) (r0 error)) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWithReturn {
+func (d SubscriptionDriverFetchPendingDeliveriesMockDescriptorWith2Args) ReturnsFrom(f func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)) SubscriptionDriverFetchPendingDeliveriesMockDescriptorWithReturn {
 	d.methodDesc.call = f
 	return SubscriptionDriverFetchPendingDeliveriesMockDescriptorWithReturn{d.methodDesc}
 }
@@ -863,7 +864,7 @@ type _makegomock_SubscriptionDriverMockFromMocker struct {
 	m *SubscriptionDriverMocker
 }
 
-func (m _makegomock_SubscriptionDriverMockFromMocker) FetchPendingDeliveries(a0 context.Context, a1 chan<- Delivery) (r0 error) {
+func (m _makegomock_SubscriptionDriverMockFromMocker) FetchPendingDeliveries(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error) {
 	return m.m.FetchPendingDeliveries(a0, a1)
 }
 
@@ -880,7 +881,7 @@ func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 con
 // It is copied from the original just to avoid introducing a dependency on
 // SubscriptionDriver's package.
 type SubscriptionDriverMock interface {
-	FetchPendingDeliveries(a0 context.Context, a1 chan<- Delivery) (r0 error)
+	FetchPendingDeliveries(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)
 	InsertSubscription(a0 context.Context) (r0 error)
 	ListenForDeliveries(a0 context.Context) (r0 AcceptFunc, r1 error)
 }

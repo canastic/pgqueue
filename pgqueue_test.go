@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"gitlab.com/canastic/chantest"
+	"gitlab.com/canastic/pgqueue/stopcontext"
 	"golang.org/x/xerrors"
 )
 
@@ -145,13 +146,13 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 
 	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (AcceptFunc, error) {
 		<-listenShouldReturn
-		return func(ctx context.Context, _ chan<- Delivery) error {
-			<-ctx.Done()
+		return func(ctx stopcontext.Context, _ chan<- Delivery) error {
+			<-ctx.Stopped()
 			return nil
 		}, nil
 	}).Times(1)
 
-	m = m.FetchPendingDeliveries().TakesAny().AndAny().ReturnsFrom(func(context.Context, chan<- Delivery) error {
+	m = m.FetchPendingDeliveries().TakesAny().AndAny().ReturnsFrom(func(stopcontext.Context, chan<- Delivery) error {
 		fetchCalled <- struct{}{}
 		return nil
 	}).Times(1)
@@ -212,8 +213,8 @@ func TestErrorOnFetchPending(t *testing.T) {
 	m := (&SubscriptionDriverMocker{}).Describe().
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
-		<-ctx.Done()
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx stopcontext.Context, _ chan<- Delivery) error {
+		<-ctx.Stopped()
 		return nil
 	}, nil).Times(1)
 
@@ -234,7 +235,7 @@ func TestErrorOnAccept(t *testing.T) {
 	m := (&SubscriptionDriverMocker{}).Describe().
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ chan<- Delivery) error {
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx stopcontext.Context, _ chan<- Delivery) error {
 		return expectedErr
 	}, nil).Times(1)
 
@@ -255,7 +256,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 	m := (&SubscriptionDriverMocker{}).Describe().
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 		requeueCalled := 0
 		defer func() {
 			assert.Equal(t, 1, requeueCalled)
@@ -271,7 +272,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 			},
 		}
 
-		<-ctx.Done()
+		<-ctx.Stopped()
 		return nil
 	}, nil).Times(1)
 
@@ -322,9 +323,9 @@ func TestErrorOnAckError(t *testing.T) {
 		m := (&SubscriptionDriverMocker{}).Describe().
 			InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-		m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+		m = m.ListenForDeliveries().TakesAny().Returns(func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 			deliveries <- d
-			<-ctx.Done()
+			<-ctx.Stopped()
 			return nil
 		}, nil).Times(1)
 
@@ -356,7 +357,7 @@ func ErrorOnRequeue(t *testing.T) {
 	m := (&SubscriptionDriverMocker{}).Describe().
 		InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, deliveries chan<- Delivery) error {
+	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 		requeueCalled := 0
 		defer func() {
 			assert.Equal(t, 1, requeueCalled)
@@ -371,7 +372,7 @@ func ErrorOnRequeue(t *testing.T) {
 				return nil
 			},
 		}
-		<-ctx.Done()
+		<-ctx.Stopped()
 		return nil
 	}, nil).Times(1)
 
@@ -427,20 +428,20 @@ func (d *testSubscriptionDriver) InsertSubscription(context.Context) error {
 	return <-ch
 }
 
-func (d *testSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, deliveries chan<- Delivery) error {
+func (d *testSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 	return d.forward(ctx, deliveries, d.pending)
 }
 
 func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
-	return func(ctx context.Context, deliveries chan<- Delivery) error {
+	return func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 		return d.forward(ctx, deliveries, d.incoming)
 	}, nil
 }
 
-func (d *testSubscriptionDriver) forward(ctx context.Context, into chan<- Delivery, from <-chan msgWithAck) error {
+func (d *testSubscriptionDriver) forward(ctx stopcontext.Context, into chan<- Delivery, from <-chan msgWithAck) error {
 	for {
 		select {
-		case <-ctx.Done():
+		case <-ctx.Stopped():
 			return nil
 		case del, ok := <-from:
 			if !ok {

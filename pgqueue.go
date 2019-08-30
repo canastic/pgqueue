@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 
 	"github.com/tcard/gock"
+	"gitlab.com/canastic/pgqueue/stopcontext"
 	"golang.org/x/xerrors"
 )
 
@@ -35,10 +36,10 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 
 		deliveries := make(chan Delivery)
 
-		ctx, cancel := context.WithCancel(ctx)
+		stopCtx, stop := stopcontext.WithStop(ctx)
 
 		return gock.Wait(func() error {
-			defer cancel()
+			defer stop()
 			for d := range deliveries {
 				err := handleDelivery(d, getHandler)
 				if err != nil {
@@ -49,12 +50,12 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 		}, func() error {
 			defer close(deliveries)
 
-			err := driver.FetchPendingDeliveries(ctx, deliveries)
+			err := driver.FetchPendingDeliveries(stopCtx, deliveries)
 			if err != nil {
 				return xerrors.Errorf("fetching pending deliveries: %w", err)
 			}
 
-			err = acceptIncoming(ctx, deliveries)
+			err = acceptIncoming(stopCtx, deliveries)
 			if err != nil {
 				return xerrors.Errorf("accepting incoming deliveries: %w", err)
 			}
@@ -118,10 +119,10 @@ type HandleFunc = func(context.Context) (context.Context, Ack)
 type SubscriptionDriver interface {
 	InsertSubscription(context.Context) error
 	ListenForDeliveries(context.Context) (AcceptFunc, error)
-	FetchPendingDeliveries(context.Context, chan<- Delivery) error
+	FetchPendingDeliveries(stopcontext.Context, chan<- Delivery) error
 }
 
-type AcceptFunc func(context.Context, chan<- Delivery) error
+type AcceptFunc func(stopcontext.Context, chan<- Delivery) error
 
 // A Delivery is an attempted delivery of a message.
 type Delivery struct {
