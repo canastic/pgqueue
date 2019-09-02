@@ -43,18 +43,21 @@ func TestPQBasicOrdered(t *testing.T) {
 	}
 
 	type consumer struct {
+		name       string
 		consume    ConsumeFunc
 		deliveries chan delivery
 		stop       func()
 	}
 
 	// Concurrent consumers to test mutual exclusion.
-	const concurrentConsumersPerSubscription = 2
+	// TODO: Bring back concurrency.
+	const concurrentConsumersPerSubscription = 1
 
 	consumers := map[string]*consumer{}
 
-	for _, name := range []string{"foo"} { // TODO: add second subscription
+	for _, name := range []string{"foo", "bar"} {
 		c := consumer{
+			name: name,
 			consume: func(context.Context, GetHandler) error {
 				return nil
 			},
@@ -111,48 +114,58 @@ func TestPQBasicOrdered(t *testing.T) {
 		startConsumer(c)
 	}
 
-	for _, c := range consumers {
+	publishedNewMessages := false
+	for consumerName, c := range consumers {
 		d := chantest.AssertRecv(t, c.deliveries).(delivery)
-		assert.Equal(t, "pending message 0", d.payload)
+		assert.Equal(t, "pending message 0", d.payload, "consumer %q", consumerName)
 
-		for i := 0; i < 3; i++ {
-			err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
-			assert.NoError(t, err)
+		if !publishedNewMessages {
+			for i := 0; i < 3; i++ {
+				err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
+				assert.NoError(t, err, "consumer %q", consumerName)
+			}
 		}
-		chantest.AssertSend(t, d.ack, OK)
 
-		for i, expected := range []string{
+		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
+
+		for _, expected := range []string{
 			"pending message 1",
 			"pending message 2",
 			"incoming message 0",
 			"incoming message 1",
 			"incoming message 2",
 		} {
-			d := chantest.AssertRecv(t, c.deliveries).(delivery)
-			assert.Equal(t, expected, d.payload, i)
-			chantest.AssertSend(t, d.ack, OK)
+			d := chantest.AssertRecv(t, c.deliveries, "consumer %q msg %q", consumerName, expected).(delivery)
+			assert.Equal(t, expected, d.payload, "consumer %q msg %q", consumerName, expected)
+			chantest.AssertSend(t, d.ack, OK, "consumer %q msg %q", consumerName, expected)
 		}
 
-		chantest.AssertNoRecv(t, c.deliveries)
+		if !publishedNewMessages {
+			chantest.AssertNoRecv(t, c.deliveries, "consumer %q", consumerName)
+			err := publishMessage(ctx, db, "new incoming message")
+			assert.NoError(t, err, "consumer %q", consumerName)
+		}
 
-		err := publishMessage(ctx, db, "new incoming message")
-		assert.NoError(t, err)
-		d = chantest.AssertRecv(t, c.deliveries).(delivery)
-		assert.Equal(t, "new incoming message", d.payload)
-		chantest.AssertSend(t, d.ack, OK)
+		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+		assert.Equal(t, "new incoming message", d.payload, "consumer %q", consumerName)
+		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
 
 		c.stop()
 		startConsumer(c)
 
-		chantest.AssertNoRecv(t, c.deliveries)
+		if !publishedNewMessages {
+			chantest.AssertNoRecv(t, c.deliveries)
+			err := publishMessage(ctx, db, "incoming message after restart")
+			assert.NoError(t, err, "consumer %q", consumerName)
+		}
 
-		err = publishMessage(ctx, db, "incoming message after restart")
-		assert.NoError(t, err)
-		d = chantest.AssertRecv(t, c.deliveries).(delivery)
-		assert.Equal(t, "incoming message after restart", d.payload)
-		chantest.AssertSend(t, d.ack, OK)
+		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+		assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
+		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
 
 		c.stop()
+
+		publishedNewMessages = true
 	}
 }
 
@@ -186,9 +199,7 @@ func (drv testPQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (Ac
 func (drv testPQSubscriptionDriver) notifToDeliveries(ctx stopcontext.Context, notif *PQNotification, deliveries chan<- Delivery) error {
 	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchIncomingRows, `
 		SELECT serial, payload
-		FROM messages m
-		JOIN message_deliveries d
-			ON m.serial = d.message_serial
+		FROM message_deliveries m
 		WHERE
 			subscription = $1
 		ORDER BY serial
@@ -198,9 +209,7 @@ func (drv testPQSubscriptionDriver) notifToDeliveries(ctx stopcontext.Context, n
 func (drv testPQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
 	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchPendingRows, `
 		SELECT serial, payload
-		FROM messages m
-		JOIN message_deliveries d
-			ON m.serial = d.message_serial
+		FROM message_deliveries m
 		WHERE
 			subscription = $1
 		ORDER BY serial
@@ -260,8 +269,10 @@ func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sql
 
 		_, err = tx.Exec(ctx, `
 			UPDATE message_deliveries SET `+MarkAsDeliveredSQL+`
-			WHERE message_serial = $1
-		`, serial)
+			WHERE
+				serial = $1
+				AND subscription = $2
+		`, serial, drv.name)
 		if err != nil {
 			return xerrors.Errorf("marking as delivered: %w", err)
 		}
@@ -294,30 +305,27 @@ func (drv testPQSubscriptionDriver) toDelivery(tx sqlx.Tx, serial int64, payload
 
 			_, err := tx.Exec(ctx, `
 				DELETE FROM message_deliveries
-				WHERE message_serial = $1 AND subscription = $2`, serial, drv.name)
-			if err != nil {
-				return err
-			}
-
-			// Attempt to delete the message, in case there are no deliveries left.
-			_, err = tx.Exec(ctx, `DELETE FROM messages WHERE serial = $1`, serial)
-			if err != nil {
-				var pqErr *pq.Error
-				const restrictViolation = "23001"
-				if xerrors.As(err, &pqErr) && pqErr.Code == restrictViolation {
-					err = nil
-				}
-			}
+				WHERE
+					serial = $1
+					AND subscription = $2
+			`, serial, drv.name)
 			return err
 		},
 		Requeue: func(ctx context.Context) error {
 			defer close(acked)
 
-			_, err := tx.Exec(ctx, `UPDATE message_deliveries SET `+UpdateLastAckSQL+` WHERE message_serial = $1`, serial)
+			_, err := tx.Exec(ctx, `
+				UPDATE message_deliveries SET `+UpdateLastAckSQL+`
+				WHERE
+					serial = $1
+					AND subscription = $2
+			`, serial, drv.name)
 			return err
 		},
 	}
 }
+
+var nextSerial int64
 
 func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 	tx, err := db.BeginTx(ctx, nil)
@@ -325,14 +333,8 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 		return xerrors.Errorf("beginning transaction: %w", err)
 	}
 
-	var msgSerial int64
-	err = tx.QueryRow(ctx,
-		"INSERT INTO messages (payload) VALUES ($1) RETURNING serial;",
-		payload,
-	).Scan(&msgSerial)
-	if ignoreUniqueViolation(err) != nil {
-		return xerrors.Errorf("inserting message: %w", err)
-	}
+	msgSerial := nextSerial
+	nextSerial++
 
 	_, err = tx.Exec(ctx, `
 		DECLARE subscriptions_cursor CURSOR FOR
@@ -354,8 +356,8 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 		}
 
 		_, err = tx.Exec(ctx,
-			"INSERT INTO message_deliveries (message_serial, subscription) VALUES ($1, $2);",
-			msgSerial, sub,
+			"INSERT INTO message_deliveries (serial, subscription, payload) VALUES ($1, $2, $3);",
+			msgSerial, sub, payload,
 		)
 		if ignoreUniqueViolation(err) != nil {
 			return xerrors.Errorf("inserting pending delivery for subscription %q and message %d: %w", sub, msgSerial, err)
@@ -442,25 +444,17 @@ CREATE TABLE subscriptions
 	CONSTRAINT subscriptions_pkey PRIMARY KEY (name)
 );
 
-CREATE TABLE messages
-(
-	serial bigserial,
-	payload text NOT NULL,
-	created_at timestamptz DEFAULT timezone('utc', now()),
-	CONSTRAINT messages_pkey PRIMARY KEY (serial)
-);
-
 CREATE TABLE message_deliveries
 (
-	message_serial bigint NOT NULL,
 	subscription text NOT NULL,
+	serial bigint NOT NULL,
+	payload text NOT NULL,
+	created_at timestamptz DEFAULT timezone('utc', now()),
 	deliveries integer NOT NULL DEFAULT 0,
 	last_delivered_at timestamptz,
-	last_ack_at timestamptz
+	last_ack_at timestamptz,
+	CONSTRAINT message_deliveries_pkey PRIMARY KEY (subscription, serial)
 );
-
-ALTER TABLE "message_deliveries"
-ADD FOREIGN KEY ("message_serial") REFERENCES "messages" ("serial") ON DELETE RESTRICT ON UPDATE RESTRICT;
 
 ALTER TABLE "message_deliveries"
 ADD FOREIGN KEY ("subscription") REFERENCES "subscriptions" ("name") ON DELETE RESTRICT ON UPDATE RESTRICT;
@@ -472,7 +466,7 @@ CREATE FUNCTION notify_message_delivery()
 AS $BODY$
 DECLARE
 BEGIN
-    PERFORM pg_notify('message:' || new.subscription, new.message_serial :: text);
+    PERFORM pg_notify('message:' || new.subscription, new.serial :: text);
     RETURN new;
 END
 $BODY$;
