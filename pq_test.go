@@ -396,11 +396,13 @@ func createTestDB(ctx context.Context, t *testing.T) (sqlxTestDB, func()) {
 	}
 
 	cleanup := func() {
+		ctx, cancel := context.WithTimeout(ctx, 1*time.Second)
+		defer cancel()
 		_, err := db.Exec(ctx, "DROP DATABASE "+name)
-		if err != nil {
-			panic(err)
+		assert.NoError(t, err)
+		if err == nil {
+			t.Log("Dropped database:", name)
 		}
-		t.Log("Dropped database:", name)
 	}
 
 	connStr := fmt.Sprintf(postgresConnString, name)
