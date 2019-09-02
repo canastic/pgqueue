@@ -119,17 +119,37 @@ func (sq SubscriptionQueries) FetchIncomingRows(
 	if !sq.Ordered.ordered {
 		onLock = " SKIP LOCKED"
 	}
-	_, err := tx.Exec(ctx, "DECLARE incoming_rows CURSOR FOR "+baseQuery+" FOR UPDATE"+onLock, args...)
+
+	// We expect error 55P03, so we insert a SAVEPOINT so that we can rollback
+	// to it if that happens and avoid invalidating the transaction.
+	_, err := tx.Exec(ctx, "SAVEPOINT before_incoming_rows;")
+	if err != nil {
+		return xerrors.Errorf("declaring savepoint: %w", err)
+	}
+
+	const cursorName = "incoming_rows"
+
+	_, err = tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+onLock, args...)
+	if err != nil {
+		return xerrors.Errorf("declaring cursor %q: %w", cursorName, err)
+	}
+
+	err = iterCursor(ctx, into, tx, cursorName)
 	if err != nil {
 		var pqErr *pq.Error
-		if xerrors.As(err, &pqErr) && pqErr.Code == "55P03" {
-			// The rows were already locked, which means that someone is already
-			// processing the message.
-			return nil
+		if !xerrors.As(err, &pqErr) || pqErr.Code != "55P03" {
+			return err
 		}
-		return err
+		// The rows were already locked, which means that someone is already
+		// processing the message.
+
+		_, err = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT before_incoming_rows;")
+		if err != nil {
+			return xerrors.Errorf("rolling back to savepoint: %w", err)
+		}
 	}
-	return iterCursor(ctx, into, tx, "incoming_rows")
+
+	return nil
 }
 
 func (sq SubscriptionQueries) FetchPendingRows(
@@ -144,11 +164,13 @@ func (sq SubscriptionQueries) FetchPendingRows(
 		maybeSkipLocked = " SKIP LOCKED"
 	}
 
-	_, err := tx.Exec(ctx, "DECLARE pending_rows CURSOR FOR "+baseQuery+" FOR UPDATE"+maybeSkipLocked, args...)
+	const cursorName = "pending_rows"
+
+	_, err := tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+maybeSkipLocked, args...)
 	if err != nil {
-		return err
+		return xerrors.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
-	return iterCursor(ctx, into, tx, "pending_rows")
+	return iterCursor(ctx, into, tx, cursorName)
 }
 
 const MarkAsDeliveredSQL string = `

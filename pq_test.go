@@ -25,7 +25,7 @@ var (
 	enabled            = os.Getenv("PGQUEUE_TEST_ENABLED") == "true"
 )
 
-func TestPQBasic(t *testing.T) {
+func TestPQBasicOrdered(t *testing.T) {
 	if !enabled {
 		t.Skip("Set PGQUEUE_TEST_ENABLED=true to run")
 		return
@@ -65,7 +65,7 @@ func TestPQBasic(t *testing.T) {
 			l := BridgePQListener(pq.NewListener(db.connStr, time.Millisecond, time.Millisecond, nil))
 			defer l.Close()
 
-			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, Unordered))
+			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, Ordered))
 			assert.NoError(t, err)
 
 			prevConsume := c.consume
@@ -121,7 +121,7 @@ func TestPQBasic(t *testing.T) {
 		}
 		chantest.AssertSend(t, d.ack, OK)
 
-		for _, expected := range []string{
+		for i, expected := range []string{
 			"pending message 1",
 			"pending message 2",
 			"incoming message 0",
@@ -129,7 +129,7 @@ func TestPQBasic(t *testing.T) {
 			"incoming message 2",
 		} {
 			d := chantest.AssertRecv(t, c.deliveries).(delivery)
-			assert.Equal(t, expected, d.payload)
+			assert.Equal(t, expected, d.payload, i)
 			chantest.AssertSend(t, d.ack, OK)
 		}
 
@@ -184,20 +184,7 @@ func (drv testPQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (Ac
 }
 
 func (drv testPQSubscriptionDriver) notifToDeliveries(ctx stopcontext.Context, notif *PQNotification, deliveries chan<- Delivery) error {
-	return drv.fetchDeliveries(ctx, deliveries, `
-		SELECT serial, payload
-		FROM messages m
-		JOIN message_deliveries d
-			ON m.serial = d.message_serial
-		WHERE
-			serial = $1 :: bigint
-			AND subscription = $2
-		ORDER BY serial
-	`, notif.Extra, drv.name)
-}
-
-func (drv testPQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
-	return drv.fetchDeliveries(ctx, deliveries, `
+	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchIncomingRows, `
 		SELECT serial, payload
 		FROM messages m
 		JOIN message_deliveries d
@@ -208,7 +195,33 @@ func (drv testPQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Conte
 	`, drv.name)
 }
 
-func (drv testPQSubscriptionDriver) fetchDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery, query string, args ...interface{}) error {
+func (drv testPQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
+	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchPendingRows, `
+		SELECT serial, payload
+		FROM messages m
+		JOIN message_deliveries d
+			ON m.serial = d.message_serial
+		WHERE
+			subscription = $1
+		ORDER BY serial
+	`, drv.name)
+}
+
+type fetchFunc = func(
+	ctx context.Context,
+	tx sqlx.Tx,
+	into chan<- ScanFunc,
+	baseQuery string,
+	args ...interface{},
+) error
+
+func (drv testPQSubscriptionDriver) fetchDeliveries(
+	ctx stopcontext.Context,
+	deliveries chan<- Delivery,
+	fetch fetchFunc,
+	query string,
+	args ...interface{},
+) error {
 	tx, err := drv.db.BeginTx(ctx, nil)
 	if err != nil {
 		return xerrors.Errorf("beginning transaction: %w", err)
@@ -219,7 +232,7 @@ func (drv testPQSubscriptionDriver) fetchDeliveries(ctx stopcontext.Context, del
 
 	err = gock.Wait(func() error {
 		defer close(rows)
-		return drv.queries.FetchIncomingRows(ctx, tx, rows, query, args...)
+		return fetch(ctx, tx, rows, query, args...)
 	}, func() error {
 		defer stop()
 		return drv.rowsToDeliveries(ctx, tx, deliveries, rows)
