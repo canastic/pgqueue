@@ -106,3 +106,34 @@ func TestDoneGraceful(t *testing.T) {
 		t.Error("expected stopcontext.Stopped")
 	}
 }
+
+func TestWithValueStoppable(t *testing.T) {
+	base, stop := stopcontext.WithStop(context.Background())
+	ctx := stopcontext.WithValue(base, "foo", "bar")
+
+	if expected, got := "bar", ctx.Value("foo"); expected != got {
+		t.Errorf("expected WithValue to set value in new context, got %q", got)
+	}
+
+	select {
+	case <-stopcontext.Stopped(ctx):
+		t.Error("unexpected Done")
+	default:
+	}
+
+	stop()
+
+	select {
+	case <-stopcontext.Stopped(ctx):
+	default:
+		t.Error("expected stopcontext.Stopped")
+	}
+}
+
+func TestWithValueNoStoppable(t *testing.T) {
+	ctx := stopcontext.WithValue(context.Background(), "foo", "bar")
+
+	if expected, got := "bar", ctx.Value("foo"); expected != got {
+		t.Errorf("expected WithValue to set value in new context, got %q", got)
+	}
+}

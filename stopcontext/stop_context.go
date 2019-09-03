@@ -7,10 +7,10 @@ import (
 	"context"
 )
 
-// Context wraps a Context. In addition to inheriting the wrapped context's Done
-// signal, it has an additional Stopped signal that signals that some iterative
-// process associated with the Context should stop on the next iteration, in a
-// graceful manner.
+// Context wraps a context.Context. In addition to inheriting the wrapped
+// context's Done signal, it has an additional Stopped signal that signals that
+// some iterative process associated with the Context should stop on the next
+// iteration, in a graceful manner.
 //
 // Context cancellation also triggers the Stopped signal, so you don't need to
 // attend to both.
@@ -71,4 +71,18 @@ func (stopContext) isGracefulContext() {}
 
 func (ctx stopContext) Stopped() <-chan struct{} {
 	return ctx.ctx.Done()
+}
+
+// WithValue works like context.WithValue, except that, if the parent is a
+// Context from this package, the new context will be also a Context chained to
+// it as detailed in WithStop.
+func WithValue(parent context.Context, key, val interface{}) context.Context {
+	if p, ok := parent.(stopContext); ok {
+		// Hook the new stop context with the old one, whose cancellation
+		// happens when its associated StopFunc is called, so that it triggers
+		// a stop stop for the new one too.
+		p.Context = context.WithValue(p.Context, key, val)
+		return p
+	}
+	return context.WithValue(parent, key, val)
 }
