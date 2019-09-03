@@ -56,13 +56,23 @@ func TestPQBasicOrdered(t *testing.T) {
 	consumers := map[string]*consumer{}
 
 	for _, name := range []string{"foo", "bar"} {
-		c := consumer{
+		var subConsume []ConsumeFunc
+
+		c := &consumer{
 			name: name,
-			consume: func(context.Context, GetHandler) error {
-				return nil
+			consume: func(ctx context.Context, gh GetHandler) error {
+				g, wait := gock.Bundle()
+				for _, consume := range subConsume {
+					consume := consume
+					g(func() error {
+						return consume(ctx, gh)
+					})
+				}
+				return wait()
 			},
-			deliveries: make(chan delivery),
+			deliveries: make(chan delivery, concurrentConsumersPerSubscription),
 		}
+		consumers[name] = c
 
 		for i := 0; i < concurrentConsumersPerSubscription; i++ {
 			l := BridgePQListener(pq.NewListener(db.connStr, time.Millisecond, time.Millisecond, nil))
@@ -71,17 +81,8 @@ func TestPQBasicOrdered(t *testing.T) {
 			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, Ordered))
 			assert.NoError(t, err)
 
-			prevConsume := c.consume
-			c.consume = func(ctx context.Context, gh GetHandler) error {
-				return gock.Wait(func() error {
-					return prevConsume(ctx, gh)
-				}, func() error {
-					return consume(ctx, gh)
-				})
-			}
+			subConsume = append(subConsume, consume)
 		}
-
-		consumers[name] = &c
 	}
 
 	for i := 0; i < 3; i++ {
