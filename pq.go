@@ -2,7 +2,9 @@ package pgqueue
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/lib/pq"
 	"gitlab.com/canastic/pgqueue/stopcontext"
@@ -19,34 +21,130 @@ type PQNotification struct {
 	Extra string
 }
 
+//go:generate make.go.mock -bare -type PQListener
+
 type PQListener interface {
 	Listen(channel string) error
 	Unlisten(channel string) error
-	NotificationChannel() <-chan *PQNotification
+	UnlistenAll() error
+	NotificationChannel() <-chan *pq.Notification
+	Ping() error
 	Close() error
+}
+
+type Listener struct {
+	PQListener
+
+	errEvent <-chan error
+
+	unlisteningMtx sync.Mutex
+	unlistening    map[string]struct{}
+}
+
+var pqNewListener = func(
+	name string,
+	minReconnectInterval time.Duration,
+	maxReconnectInterval time.Duration,
+	eventCallback pq.EventCallbackType,
+) PQListener {
+	return pq.NewListener(name, minReconnectInterval, maxReconnectInterval, eventCallback)
+}
+
+func NewListener(
+	name string,
+	minReconnectInterval time.Duration,
+	maxReconnectInterval time.Duration,
+	eventCallback pq.EventCallbackType,
+) *Listener {
+	errEvent := make(chan error, 1)
+	gotErrEvent := false
+	return &Listener{
+		PQListener: pqNewListener(name, minReconnectInterval, maxReconnectInterval, func(event pq.ListenerEventType, err error) {
+			if !gotErrEvent {
+				switch event {
+				case pq.ListenerEventDisconnected, pq.ListenerEventConnectionAttemptFailed:
+					errEvent <- err
+				}
+			}
+			if eventCallback != nil {
+				eventCallback(event, err)
+			}
+		}),
+		errEvent:    errEvent,
+		unlistening: make(map[string]struct{}),
+	}
+}
+
+var timeSleep = time.Sleep
+
+func (l *Listener) Listen(ctx context.Context, channel string) error {
+	// We want this to be guaranteed:
+	//
+	//     l.Unlisten("foo") // returns err == nil
+	//     l.Listen(ctx, "foo") // doesn't return pq.ErrChannelAlreadyOpen
+	//
+	// Unfortunately, pq's Unlisten doesn't seem to be really sync, and also
+	// doesn't provide a way to wait until it's done.
+	//
+	// So we do this: when we Unlisten a channel, put it in a unlistening set.
+	// Then, if we Listen to that channel again, and that returns a
+	// pq.ErrChannelAlreadyOpen, check if it's in unlistening. If it is,
+	// reattempt the Listen until the async Unlisten actually finishes. By that
+	// time, Listen should stop returning pq.ErrChannelAlreadyOpen, so we return
+	// a nil error.
+	//
+	// In any other situation, we just return what the underlying Listen
+	// returns.
+
+	for {
+		listenErr := make(chan error, 1)
+		go func() { listenErr <- l.PQListener.Listen(channel) }()
+
+		var err error
+		select {
+		case <-stopcontext.Stopped(ctx):
+			return ctx.Err()
+		case err = <-listenErr:
+			if xerrors.Is(err, pq.ErrChannelAlreadyOpen) {
+				l.unlisteningMtx.Lock()
+				_, isUnlistening := l.unlistening[channel]
+				l.unlisteningMtx.Unlock()
+
+				if isUnlistening {
+					timeSleep(50 * time.Millisecond)
+					continue
+				}
+			}
+
+			if err != nil {
+				return err
+			}
+		}
+
+		delete(l.unlistening, channel)
+		return nil
+	}
+}
+
+func (l *Listener) Unlisten(channel string) error {
+	err := l.PQListener.Unlisten(channel)
+	if err != nil {
+		return err
+	}
+
+	l.unlisteningMtx.Lock()
+	l.unlistening[channel] = struct{}{}
+	l.unlisteningMtx.Unlock()
+	return nil
 }
 
 func ListenForNotificationsAsDeliveries(
 	ctx context.Context,
-	listener PQListener,
+	listener *Listener,
 	channel string,
 	toDeliveries func(stopcontext.Context, *PQNotification, chan<- Delivery) error,
 ) (AcceptFunc, error) {
-	listenErr := make(chan error, 1)
-	go func() { listenErr <- listener.Listen(channel) }()
-
-	var err error
-	select {
-	case <-stopcontext.Stopped(ctx):
-		err = ctx.Err()
-		if err == nil {
-			// No error, so we must return a no-op AcceptFunc.
-			return func(stopcontext.Context, chan<- Delivery) error {
-				return nil
-			}, nil
-		}
-	case err = <-listenErr:
-	}
+	err := listener.Listen(ctx, channel)
 	if err != nil {
 		return nil, xerrors.Errorf("listening to channel %q: %w", channel, err)
 	}
@@ -70,44 +168,15 @@ func ListenForNotificationsAsDeliveries(
 					return nil
 				}
 
-				err := toDeliveries(ctx, notif, deliveries)
+				err := toDeliveries(ctx, (*PQNotification)(notif), deliveries)
 				if err != nil {
 					return xerrors.Errorf("mapping Postgres notification to deliveries: %w", err)
 				}
+			case err := <-listener.errEvent:
+				return xerrors.Errorf("notifications listener connection: %w", err)
 			}
 		}
 	}, nil
-}
-
-func BridgePQListener(l *pq.Listener) PQListener {
-	return pqListenerBridge{l}
-}
-
-type pqListenerBridge struct {
-	l *pq.Listener
-}
-
-func (l pqListenerBridge) Listen(channel string) error {
-	return l.l.Listen(channel)
-}
-
-func (l pqListenerBridge) Unlisten(channel string) error {
-	return l.l.Unlisten(channel)
-}
-
-func (l pqListenerBridge) NotificationChannel() <-chan *PQNotification {
-	ch := make(chan *PQNotification)
-	go func() {
-		defer close(ch)
-		for notif := range l.l.NotificationChannel() {
-			ch <- (*PQNotification)(notif)
-		}
-	}()
-	return ch
-}
-
-func (l pqListenerBridge) Close() error {
-	return l.l.Close()
 }
 
 type OrderGuarantee struct {

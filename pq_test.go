@@ -210,7 +210,7 @@ func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order 
 		consumers[name] = c
 
 		for i := 0; i < concurrentConsumersPerSubscription; i++ {
-			l := BridgePQListener(pq.NewListener(db.connStr, time.Millisecond, time.Millisecond, nil))
+			l := NewListener(db.connStr, time.Millisecond, time.Millisecond, nil)
 			prevCleanup := cleanup
 			cleanup = func() { l.Close(); prevCleanup() }
 
@@ -322,12 +322,12 @@ type testConsumer struct {
 
 type testPQSubscriptionDriver struct {
 	db      sqlx.DB
-	l       PQListener
+	l       *Listener
 	name    string
 	queries SubscriptionQueries
 }
 
-func newTestPQSubscriptionDriver(db sqlx.DB, l PQListener, name string, ordered OrderGuarantee) testPQSubscriptionDriver {
+func newTestPQSubscriptionDriver(db sqlx.DB, l *Listener, name string, ordered OrderGuarantee) testPQSubscriptionDriver {
 	return testPQSubscriptionDriver{
 		db:      db,
 		l:       l,
