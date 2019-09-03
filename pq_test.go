@@ -50,8 +50,7 @@ func TestPQBasicOrdered(t *testing.T) {
 	}
 
 	// Concurrent consumers to test mutual exclusion.
-	// TODO: Bring back concurrency.
-	const concurrentConsumersPerSubscription = 1
+	const concurrentConsumersPerSubscription = 2
 
 	consumers := map[string]*consumer{}
 
@@ -173,6 +172,12 @@ func TestPQBasicOrdered(t *testing.T) {
 		assert.Equal(t, "new incoming message", d.payload, "consumer %q", consumerName)
 		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
 
+		if publishedNewMessages {
+			// Let's consume next expected message but not ACK it, to test it
+			// that we get it delivered again when we restart the consumers.
+			d := chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+			assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
+		}
 		c.stop()
 		startConsumer(c)
 
