@@ -41,7 +41,7 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 		return gock.Wait(func() error {
 			defer stop()
 			for d := range deliveries {
-				err := handleDelivery(d, getHandler)
+				err := handleDelivery(ctx, d, getHandler)
 				if err != nil {
 					return xerrors.Errorf("handling delivery: %w", err)
 				}
@@ -69,8 +69,7 @@ type ConsumeFunc = func(context.Context, GetHandler) error
 
 var ErrRequeued = errors.New("a message was requeued; redelivery not guaranteed unless consuming starts again")
 
-func handleDelivery(d Delivery, getHandler GetHandler) (err error) {
-	ctx := context.Background()
+func handleDelivery(ctx context.Context, d Delivery, getHandler GetHandler) (err error) {
 	ack := Requeue
 	defer func() {
 		ackErr := d.Ack(ctx, ack)
