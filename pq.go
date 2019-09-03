@@ -33,13 +33,21 @@ func ListenForNotificationsAsDeliveries(
 ) (AcceptFunc, error) {
 	listenErr := make(chan error, 1)
 	go func() { listenErr <- listener.Listen(channel) }()
+
+	var err error
 	select {
 	case <-stopcontext.Stopped(ctx):
-		return nil, ctx.Err()
-	case err := <-listenErr:
-		if err != nil {
-			return nil, xerrors.Errorf("listening to channel %q: %w", channel, err)
+		err = ctx.Err()
+		if err == nil {
+			// No error, so we must return a no-op AcceptFunc.
+			return func(stopcontext.Context, chan<- Delivery) error {
+				return nil
+			}, nil
 		}
+	case err = <-listenErr:
+	}
+	if err != nil {
+		return nil, xerrors.Errorf("listening to channel %q: %w", channel, err)
 	}
 
 	notifs := listener.NotificationChannel()
