@@ -110,10 +110,26 @@ func TestPQBasicOrdered(t *testing.T) {
 				var payload string
 				return &payload, func(ctx context.Context) (context.Context, Ack) {
 					ack := make(chan Ack)
-					c.deliveries <- delivery{payload, ack}
-					return ctx, <-ack
+
+					select {
+					case <-stopcontext.Stopped(ctx):
+						return ctx, Requeue
+					case c.deliveries <- delivery{payload, ack}:
+					}
+
+					select {
+					case <-stopcontext.Stopped(ctx):
+						return ctx, Requeue
+					case ack := <-ack:
+						return ctx, ack
+					}
 				}
 			})
+			if gock.AnyIs(err, ErrRequeued) {
+				// Message can be requeued if consumer was stopped while a
+				// delivery was being handled.
+				err = nil
+			}
 			assert.NoError(t, err)
 		}()
 	}
