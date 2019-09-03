@@ -27,14 +27,17 @@ type Context interface {
 	isGracefulContext()
 }
 
-// Stopped is a helper function that calls Stopped if the given context is a
-// Context from this package and Done otherwise.
+// Stopped is a helper function that calls Stopped if the given context has an
+// ancestor created with WithStop from this package and Done otherwise.
 //
 // It is useful for iterative processes that want to support both the standard
 // Context and the graceful stop provided by this package's Context.
 func Stopped(ctx context.Context) <-chan struct{} {
 	if ctx, ok := ctx.(Context); ok {
 		return ctx.Stopped()
+	}
+	if ctx, ok := ctx.Value(stopCtxKey).(context.Context); ok {
+		return ctx.Done()
 	}
 	return ctx.Done()
 }
@@ -45,19 +48,19 @@ type StopFunc = func()
 // WithStop derives a Context whose Stopped signal is triggered by calling the
 // returned StopFunc.
 //
-// If the parent context is a Context from this package, the new Context's
-// Stopped signal will propagate the parent's Stopped signal too.
+// If the parent context has an ancestor created with WithStop, the new
+// Context's Stopped signal will propagate the parent's Stopped signal too.
 func WithStop(parent context.Context) (Context, StopFunc) {
 	stopParent := parent
-	if p, ok := parent.(stopContext); ok {
+	if p, ok := parent.Value(stopCtxKey).(context.Context); ok {
 		// Hook the new stop context with the old one, whose cancellation
 		// happens when its associated StopFunc is called, so that it triggers
 		// a stop stop for the new one too.
-		stopParent = p.ctx
+		stopParent = p
 	}
 	ctx, cancel := context.WithCancel(stopParent)
 	return stopContext{
-		Context: parent,
+		Context: context.WithValue(parent, stopCtxKey, ctx),
 		ctx:     ctx,
 	}, cancel
 }
@@ -73,16 +76,7 @@ func (ctx stopContext) Stopped() <-chan struct{} {
 	return ctx.ctx.Done()
 }
 
-// WithValue works like context.WithValue, except that, if the parent is a
-// Context from this package, the new context will be also a Context chained to
-// it as detailed in WithStop.
-func WithValue(parent context.Context, key, val interface{}) context.Context {
-	if p, ok := parent.(stopContext); ok {
-		// Hook the new stop context with the old one, whose cancellation
-		// happens when its associated StopFunc is called, so that it triggers
-		// a stop stop for the new one too.
-		p.Context = context.WithValue(p.Context, key, val)
-		return p
-	}
-	return context.WithValue(parent, key, val)
-}
+var stopCtxKey = func() interface{} {
+	type t struct{}
+	return t{}
+}()

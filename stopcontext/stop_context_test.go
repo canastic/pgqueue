@@ -109,7 +109,7 @@ func TestDoneGraceful(t *testing.T) {
 
 func TestWithValueStoppable(t *testing.T) {
 	base, stop := stopcontext.WithStop(context.Background())
-	ctx := stopcontext.WithValue(base, "foo", "bar")
+	ctx := context.WithValue(base, "foo", "bar")
 
 	if expected, got := "bar", ctx.Value("foo"); expected != got {
 		t.Errorf("expected WithValue to set value in new context, got %q", got)
@@ -131,7 +131,7 @@ func TestWithValueStoppable(t *testing.T) {
 }
 
 func TestWithValueNoStoppable(t *testing.T) {
-	ctx := stopcontext.WithValue(context.Background(), "foo", "bar")
+	ctx := context.WithValue(context.Background(), "foo", "bar")
 
 	if expected, got := "bar", ctx.Value("foo"); expected != got {
 		t.Errorf("expected WithValue to set value in new context, got %q", got)
