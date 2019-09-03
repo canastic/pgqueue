@@ -6,4 +6,6 @@ stages:
 test:
     stage: test
     script:
+      - git config --global credential.helper store
+      - echo 'https://tcard:mtitALP1wFDVLxPn86dc@gitlab.com' >> ~/.git-credentials
       - go test -race $(go list ./... | grep -v /vendor/)
