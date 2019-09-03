@@ -2,6 +2,7 @@ package pgqueue
 
 import (
 	"context"
+	"sync/atomic"
 
 	"github.com/lib/pq"
 	"gitlab.com/canastic/pgqueue/stopcontext"
@@ -200,10 +201,10 @@ const UpdateLastAckSQL string = `
 type ScanFunc = func(into ...interface{}) (ok bool, err error)
 
 func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor string) error {
-	done := false
-	var iterErr error
+	var done atomicBool
+	iterErr := make(chan error, 1)
 
-	for !done {
+	for !done.load() {
 		select {
 		case <-stopcontext.Stopped(ctx):
 			return ctx.Err()
@@ -224,12 +225,12 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 			// a bool.
 			rows, err := tx.Query(ctx, "FETCH NEXT FROM "+cursor)
 			if err != nil {
-				iterErr = xerrors.Errorf("fetching next from cursor: %w", err)
-				done = true
+				iterErr <- xerrors.Errorf("fetching next from cursor: %w", err)
+				done.store(true)
 				return false, nil
 			}
 			if !rows.Next() {
-				done = true
+				done.store(true)
 				return false, nil
 			}
 
@@ -237,10 +238,11 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 				rows.Close()
 				err := rows.Err()
 				if err != nil {
-					iterErr = xerrors.Errorf("iterating rows: %w", err)
+					iterErr <- xerrors.Errorf("iterating rows: %w", err)
+					done.store(true)
 				}
 
-				if done {
+				if done.load() {
 					tx.Exec(ctx, "CLOSE "+cursor)
 				}
 			}()
@@ -250,5 +252,24 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 		}
 	}
 
-	return iterErr
+	select {
+	case err := <-iterErr:
+		return err
+	default:
+		return nil
+	}
+}
+
+type atomicBool uintptr
+
+func (b *atomicBool) store(v bool) {
+	var u uintptr = 0
+	if v {
+		u = 1
+	}
+	atomic.StoreUintptr((*uintptr)(b), u)
+}
+
+func (b *atomicBool) load() bool {
+	return atomic.LoadUintptr((*uintptr)(b)) > 0
 }
