@@ -34,111 +34,15 @@ func TestPQBasicOrdered(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	db, cleanup := createTestDB(ctx, t)
-	defer cleanup()
+	db, cleanupDB := createTestDB(ctx, t)
+	defer cleanupDB()
 
-	type delivery struct {
-		payload string
-		ack     chan<- Ack
-	}
-
-	type consumer struct {
-		name       string
-		consume    ConsumeFunc
-		deliveries chan delivery
-		stop       func()
-	}
-
-	// Concurrent consumers to test mutual exclusion.
-	const concurrentConsumersPerSubscription = 2
-
-	consumers := map[string]*consumer{}
-
-	for _, name := range []string{"foo", "bar"} {
-		var subConsume []ConsumeFunc
-
-		c := &consumer{
-			name: name,
-			consume: func(ctx context.Context, gh GetHandler) error {
-				g, wait := gock.Bundle()
-				for _, consume := range subConsume {
-					consume := consume
-					g(func() error {
-						return consume(ctx, gh)
-					})
-				}
-				return wait()
-			},
-			deliveries: make(chan delivery, concurrentConsumersPerSubscription),
-		}
-		consumers[name] = c
-
-		for i := 0; i < concurrentConsumersPerSubscription; i++ {
-			l := BridgePQListener(pq.NewListener(db.connStr, time.Millisecond, time.Millisecond, nil))
-			defer l.Close()
-
-			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, Ordered))
-			assert.NoError(t, err)
-
-			subConsume = append(subConsume, consume)
-		}
-	}
-
-	for i := 0; i < 3; i++ {
-		err := publishMessage(ctx, db, fmt.Sprintf("pending message %d", i))
-		assert.NoError(t, err)
-	}
-
-	startConsumer := func(c *consumer) {
-		ctx, cancel := context.WithCancel(ctx)
-		ctx, stop := stopcontext.WithStop(ctx)
-		done := make(chan struct{}, 1)
-		c.stop = func() {
-			stop()
-			select {
-			case <-done:
-			case <-time.After(1 * time.Second):
-				t.Errorf("had to cancel consumer %q", c.name)
-				cancel()
-			}
-		}
-
-		go func() {
-			defer close(done)
-			err := c.consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
-				var payload string
-				return &payload, func(ctx context.Context) (context.Context, Ack) {
-					ack := make(chan Ack)
-
-					select {
-					case <-stopcontext.Stopped(ctx):
-						return ctx, Requeue
-					case c.deliveries <- delivery{payload, ack}:
-					}
-
-					select {
-					case <-stopcontext.Stopped(ctx):
-						return ctx, Requeue
-					case ack := <-ack:
-						return ctx, ack
-					}
-				}
-			})
-			if gock.AnyIs(err, ErrRequeued) {
-				// Message can be requeued if consumer was stopped while a
-				// delivery was being handled.
-				err = nil
-			}
-			assert.NoError(t, err)
-		}()
-	}
-	for _, c := range consumers {
-		startConsumer(c)
-	}
+	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Ordered)
+	defer cleanupConsumers()
 
 	publishedNewMessages := false
 	for consumerName, c := range consumers {
-		d := chantest.AssertRecv(t, c.deliveries).(delivery)
+		d := chantest.AssertRecv(t, c.deliveries).(testStringDelivered)
 		assert.Equal(t, "pending message 0", d.payload, "consumer %q", consumerName)
 
 		if !publishedNewMessages {
@@ -157,7 +61,7 @@ func TestPQBasicOrdered(t *testing.T) {
 			"incoming message 1",
 			"incoming message 2",
 		} {
-			d := chantest.AssertRecv(t, c.deliveries, "consumer %q msg %q", consumerName, expected).(delivery)
+			d := chantest.AssertRecv(t, c.deliveries, "consumer %q msg %q", consumerName, expected).(testStringDelivered)
 			assert.Equal(t, expected, d.payload, "consumer %q msg %q", consumerName, expected)
 			chantest.AssertSend(t, d.ack, OK, "consumer %q msg %q", consumerName, expected)
 		}
@@ -168,18 +72,18 @@ func TestPQBasicOrdered(t *testing.T) {
 			assert.NoError(t, err, "consumer %q", consumerName)
 		}
 
-		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
 		assert.Equal(t, "new incoming message", d.payload, "consumer %q", consumerName)
 		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
 
 		if publishedNewMessages {
 			// Let's consume next expected message but not ACK it, to test it
 			// that we get it delivered again when we restart the consumers.
-			d := chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+			d := chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
 			assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
 		}
 		c.stop()
-		startConsumer(c)
+		startTestConsumer(t, ctx, c)
 
 		if !publishedNewMessages {
 			chantest.AssertNoRecv(t, c.deliveries)
@@ -187,7 +91,7 @@ func TestPQBasicOrdered(t *testing.T) {
 			assert.NoError(t, err, "consumer %q", consumerName)
 		}
 
-		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(delivery)
+		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
 		assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
 		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
 
@@ -195,6 +99,116 @@ func TestPQBasicOrdered(t *testing.T) {
 
 		publishedNewMessages = true
 	}
+}
+
+func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order OrderGuarantee) (consumers map[string]*testConsumer, cleanup func()) {
+	// Concurrent consumers to test mutual exclusion.
+	const concurrentConsumersPerSubscription = 2
+
+	consumers = map[string]*testConsumer{}
+	cleanup = func() {}
+
+	for _, name := range []string{"foo", "bar"} {
+		var subConsume []ConsumeFunc
+
+		c := &testConsumer{
+			name: name,
+			consume: func(ctx context.Context, gh GetHandler) error {
+				g, wait := gock.Bundle()
+				for _, consume := range subConsume {
+					consume := consume
+					g(func() error {
+						return consume(ctx, gh)
+					})
+				}
+				return wait()
+			},
+			deliveries: make(chan testStringDelivered, concurrentConsumersPerSubscription),
+		}
+		consumers[name] = c
+
+		for i := 0; i < concurrentConsumersPerSubscription; i++ {
+			l := BridgePQListener(pq.NewListener(db.connStr, time.Millisecond, time.Millisecond, nil))
+			prevCleanup := cleanup
+			cleanup = func() { l.Close(); prevCleanup() }
+
+			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, order))
+			assert.NoError(t, err)
+
+			subConsume = append(subConsume, consume)
+		}
+	}
+
+	for i := 0; i < 3; i++ {
+		err := publishMessage(ctx, db, fmt.Sprintf("pending message %d", i))
+		assert.NoError(t, err)
+	}
+
+	for _, c := range consumers {
+		startTestConsumer(t, ctx, c)
+	}
+
+	return consumers, cleanup
+}
+
+func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
+	t.Helper()
+
+	ctx, cancel := context.WithCancel(ctx)
+	ctx, stop := stopcontext.WithStop(ctx)
+	done := make(chan struct{}, 1)
+	c.stop = func() {
+		t.Helper()
+
+		stop()
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Errorf("had to cancel consumer %q", c.name)
+			cancel()
+		}
+	}
+
+	go func() {
+		defer close(done)
+		err := c.consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
+			var payload string
+			return &payload, func(ctx context.Context) (context.Context, Ack) {
+				ack := make(chan Ack)
+
+				select {
+				case <-stopcontext.Stopped(ctx):
+					return ctx, Requeue
+				case c.deliveries <- testStringDelivered{payload, ack}:
+				}
+
+				select {
+				case <-stopcontext.Stopped(ctx):
+					return ctx, Requeue
+				case ack := <-ack:
+					return ctx, ack
+				}
+			}
+		})
+		if gock.AnyIs(err, ErrRequeued) {
+			// Message can be requeued if consumer was stopped while a
+			// delivery was being handled.
+			err = nil
+		}
+		assert.NoError(t, err)
+	}()
+}
+
+type testStringDelivered struct {
+	payload string
+	ack     chan<- Ack
+}
+
+type testConsumer struct {
+	name       string
+	consume    ConsumeFunc
+	deliveries chan testStringDelivered
+	stop       func()
 }
 
 // TODO: Exhaustive failure and concurrency tests.
