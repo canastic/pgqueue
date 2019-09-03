@@ -91,11 +91,17 @@ func TestPQBasicOrdered(t *testing.T) {
 	}
 
 	startConsumer := func(c *consumer) {
+		ctx, cancel := context.WithCancel(ctx)
 		ctx, stop := stopcontext.WithStop(ctx)
 		done := make(chan struct{}, 1)
 		c.stop = func() {
 			stop()
-			<-done
+			select {
+			case <-done:
+			case <-time.After(1 * time.Second):
+				t.Errorf("had to cancel consumer %q", c.name)
+				cancel()
+			}
 		}
 
 		go func() {
