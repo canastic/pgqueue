@@ -55,6 +55,12 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 				return xerrors.Errorf("fetching pending deliveries: %w", err)
 			}
 
+			select {
+			case <-stopCtx.Stopped():
+				return stopCtx.Err()
+			default:
+			}
+
 			err = acceptIncoming(stopCtx, deliveries)
 			if err != nil {
 				return xerrors.Errorf("accepting incoming deliveries: %w", err)

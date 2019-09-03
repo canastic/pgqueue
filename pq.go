@@ -58,6 +58,12 @@ func ListenForNotificationsAsDeliveries(
 			select {
 			case <-ctx.Stopped():
 				return ctx.Err()
+			default:
+			}
+
+			select {
+			case <-ctx.Stopped():
+				return ctx.Err()
 			case notif, ok := <-notifs:
 				if !ok {
 					return nil
@@ -197,6 +203,12 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 	var iterErr error
 
 	for !done {
+		select {
+		case <-stopcontext.Stopped(ctx):
+			return ctx.Err()
+		default:
+		}
+
 		select {
 		case <-stopcontext.Stopped(ctx):
 			return ctx.Err()
