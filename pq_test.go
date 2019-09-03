@@ -101,6 +101,88 @@ func TestPQBasicOrdered(t *testing.T) {
 	}
 }
 
+func TestPQBasicUnordered(t *testing.T) {
+	if !enabled {
+		t.Skip("Set PGQUEUE_TEST_ENABLED=true to run")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, cleanupDB := createTestDB(ctx, t)
+	defer cleanupDB()
+
+	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Unordered)
+	defer cleanupConsumers()
+
+	publishedNewMessages := false
+	for consumerName, c := range consumers {
+		expected := []string{
+			"pending message 0",
+			"pending message 1",
+			"pending message 2",
+		}
+		if publishedNewMessages {
+			expected = append(expected,
+				"incoming message 0",
+				"incoming message 1",
+				"incoming message 2",
+				"new incoming message",
+				"incoming message after restart",
+			)
+		}
+		assertReceive, assertAllReceived := unorderedExpecter(c, expected)
+
+		assertReceive(t)
+
+		if !publishedNewMessages {
+			for i := 0; i < 3; i++ {
+				err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
+				assert.NoError(t, err, "consumer %q", consumerName)
+			}
+		}
+
+		for range []string{
+			"pending message 1",
+			"pending message 2",
+			"incoming message 0",
+			"incoming message 1",
+			"incoming message 2",
+		} {
+			assertReceive(t)
+		}
+
+		if !publishedNewMessages {
+			chantest.AssertNoRecv(t, c.deliveries, "consumer %q", consumerName)
+			err := publishMessage(ctx, db, "new incoming message")
+			assert.NoError(t, err, "consumer %q", consumerName)
+		}
+		assertReceive(t)
+
+		if publishedNewMessages {
+			// Let's consume next expected message but not ACK it, to test it
+			// that we get it delivered again when we restart the consumers.
+			chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName)
+		}
+		c.stop()
+		startTestConsumer(t, ctx, c)
+
+		if !publishedNewMessages {
+			chantest.AssertNoRecv(t, c.deliveries)
+			err := publishMessage(ctx, db, "incoming message after restart")
+			assert.NoError(t, err, "consumer %q", consumerName)
+		}
+		assertReceive(t)
+
+		c.stop()
+
+		publishedNewMessages = true
+
+		assertAllReceived(t)
+	}
+}
+
 func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order OrderGuarantee) (consumers map[string]*testConsumer, cleanup func()) {
 	// Concurrent consumers to test mutual exclusion.
 	const concurrentConsumersPerSubscription = 2
@@ -174,6 +256,7 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 		err := c.consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
 			var payload string
 			return &payload, func(ctx context.Context) (context.Context, Ack) {
+
 				ack := make(chan Ack)
 
 				select {
@@ -197,6 +280,30 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 		}
 		assert.NoError(t, err)
 	}()
+}
+
+func unorderedExpecter(c *testConsumer, expectedPayloads []string) (assertReceive, assertAllReceived func(*testing.T)) {
+	expectedSet := map[string]struct{}{}
+	for _, expected := range expectedPayloads {
+		expectedSet[expected] = struct{}{}
+	}
+
+	deliveryCount := 0
+
+	assertReceive = func(t *testing.T) {
+		t.Helper()
+		d := chantest.AssertRecv(t, c.deliveries, "consumer %q delivery %d", c.name, deliveryCount).(testStringDelivered)
+		delete(expectedSet, d.payload)
+		chantest.AssertSend(t, d.ack, OK, "consumer %q delivery %d", c.name, deliveryCount)
+		deliveryCount++
+	}
+
+	assertAllReceived = func(t *testing.T) {
+		t.Helper()
+		assert.Len(t, expectedSet, 0)
+	}
+
+	return assertReceive, assertAllReceived
 }
 
 type testStringDelivered struct {

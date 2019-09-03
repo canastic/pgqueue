@@ -184,6 +184,7 @@ func (sq SubscriptionQueries) FetchPendingRows(
 	if err != nil {
 		return xerrors.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
+
 	return iterCursor(ctx, into, tx, cursorName)
 }
 
