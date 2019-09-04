@@ -400,7 +400,12 @@ func (drv testPQSubscriptionDriver) fetchDeliveries(
 		return err
 	}
 
-	return tx.Commit()
+	err = tx.Commit()
+	if err != nil {
+		return xerrors.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
 }
 
 func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, deliveries chan<- Delivery, rows <-chan ScanFunc) error {

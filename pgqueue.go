@@ -135,9 +135,17 @@ type Delivery struct {
 func (d Delivery) Ack(ctx context.Context, ack Ack) error {
 	switch ack {
 	case OK:
-		return d.OK(ctx)
+		err := d.OK(ctx)
+		if err != nil {
+			return xerrors.Errorf("acknowledging delivery: %w", err)
+		}
+		return nil
 	case Requeue:
-		return d.Requeue(ctx)
+		err := d.Requeue(ctx)
+		if err != nil {
+			return xerrors.Errorf("requeuing delivery: %w", err)
+		}
+		return nil
 	default:
 		panic(fmt.Errorf("unknown value for Ack: %v", bool(ack)))
 	}
