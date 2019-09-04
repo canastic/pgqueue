@@ -2,7 +2,6 @@ package pgqueue
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,8 +20,6 @@ type PQNotification struct {
 	Extra string
 }
 
-//go:generate make.go.mock -bare -type PQListener
-
 type PQListener interface {
 	Listen(channel string) error
 	Unlisten(channel string) error
@@ -34,11 +31,7 @@ type PQListener interface {
 
 type Listener struct {
 	PQListener
-
 	errEvent <-chan error
-
-	unlisteningMtx sync.Mutex
-	unlistening    map[string]struct{}
 }
 
 var pqNewListener = func(
@@ -70,72 +63,23 @@ func NewListener(
 				eventCallback(event, err)
 			}
 		}),
-		errEvent:    errEvent,
-		unlistening: make(map[string]struct{}),
+		errEvent: errEvent,
 	}
 }
 
 var timeSleep = time.Sleep
 
 func (l *Listener) Listen(ctx context.Context, channel string) error {
-	// We want this to be guaranteed:
-	//
-	//     l.Unlisten("foo") // returns err == nil
-	//     l.Listen(ctx, "foo") // doesn't return pq.ErrChannelAlreadyOpen
-	//
-	// Unfortunately, pq's Unlisten doesn't seem to be really sync, and also
-	// doesn't provide a way to wait until it's done.
-	//
-	// So we do this: when we Unlisten a channel, put it in a unlistening set.
-	// Then, if we Listen to that channel again, and that returns a
-	// pq.ErrChannelAlreadyOpen, check if it's in unlistening. If it is,
-	// reattempt the Listen until the async Unlisten actually finishes. By that
-	// time, Listen should stop returning pq.ErrChannelAlreadyOpen, so we return
-	// a nil error.
-	//
-	// In any other situation, we just return what the underlying Listen
-	// returns.
+	listenErr := make(chan error, 1)
+	go func() { listenErr <- l.PQListener.Listen(channel) }()
 
-	for {
-		listenErr := make(chan error, 1)
-		go func() { listenErr <- l.PQListener.Listen(channel) }()
-
-		var err error
-		select {
-		case <-stopcontext.Stopped(ctx):
-			return ctx.Err()
-		case err = <-listenErr:
-			if xerrors.Is(err, pq.ErrChannelAlreadyOpen) {
-				l.unlisteningMtx.Lock()
-				_, isUnlistening := l.unlistening[channel]
-				l.unlisteningMtx.Unlock()
-
-				if isUnlistening {
-					timeSleep(50 * time.Millisecond)
-					continue
-				}
-			}
-
-			if err != nil {
-				return err
-			}
-		}
-
-		delete(l.unlistening, channel)
-		return nil
+	var err error
+	select {
+	case <-stopcontext.Stopped(ctx):
+		err = ctx.Err()
+	case err = <-listenErr:
 	}
-}
-
-func (l *Listener) Unlisten(channel string) error {
-	err := l.PQListener.Unlisten(channel)
-	if err != nil {
-		return err
-	}
-
-	l.unlisteningMtx.Lock()
-	l.unlistening[channel] = struct{}{}
-	l.unlisteningMtx.Unlock()
-	return nil
+	return err
 }
 
 func ListenForNotificationsAsDeliveries(
