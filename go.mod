@@ -10,5 +10,4 @@ require (
 	gitlab.com/canastic/chantest v0.1.0
 	gitlab.com/canastic/sqlx v0.0.0-20190724160525-407933e1ad5b
 	gitlab.com/canastic/ulidx v0.1.1
-	golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7
 )
