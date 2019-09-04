@@ -10,7 +10,6 @@ import (
 
 	"github.com/tcard/gock"
 	"gitlab.com/canastic/pgqueue/stopcontext"
-	"golang.org/x/xerrors"
 )
 
 // Subscribe creates a subscription and returns a function to consume from it.
@@ -31,7 +30,7 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 
 		acceptIncoming, err := driver.ListenForDeliveries(ctx)
 		if err != nil {
-			return xerrors.Errorf("listening for deliveries: %w", err)
+			return fmt.Errorf("listening for deliveries: %w", err)
 		}
 
 		deliveries := make(chan Delivery)
@@ -43,7 +42,7 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 			for d := range deliveries {
 				err := handleDelivery(ctx, d, getHandler)
 				if err != nil {
-					return xerrors.Errorf("handling delivery: %w", err)
+					return fmt.Errorf("handling delivery: %w", err)
 				}
 			}
 			return nil
@@ -52,12 +51,12 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 
 			err := driver.FetchPendingDeliveries(stopCtx, deliveries)
 			if err != nil {
-				return xerrors.Errorf("fetching pending deliveries: %w", err)
+				return fmt.Errorf("fetching pending deliveries: %w", err)
 			}
 
 			err = acceptIncoming(stopCtx, deliveries)
 			if err != nil {
-				return xerrors.Errorf("accepting incoming deliveries: %w", err)
+				return fmt.Errorf("accepting incoming deliveries: %w", err)
 			}
 
 			return nil
@@ -137,13 +136,13 @@ func (d Delivery) Ack(ctx context.Context, ack Ack) error {
 	case OK:
 		err := d.OK(ctx)
 		if err != nil {
-			return xerrors.Errorf("acknowledging delivery: %w", err)
+			return fmt.Errorf("acknowledging delivery: %w", err)
 		}
 		return nil
 	case Requeue:
 		err := d.Requeue(ctx)
 		if err != nil {
-			return xerrors.Errorf("requeuing delivery: %w", err)
+			return fmt.Errorf("requeuing delivery: %w", err)
 		}
 		return nil
 	default:

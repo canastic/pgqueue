@@ -2,13 +2,14 @@ package pgqueue
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"time"
 
 	"github.com/lib/pq"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
-	"golang.org/x/xerrors"
 )
 
 type PQNotification struct {
@@ -90,7 +91,7 @@ func ListenForNotificationsAsDeliveries(
 ) (AcceptFunc, error) {
 	err := listener.Listen(ctx, channel)
 	if err != nil {
-		return nil, xerrors.Errorf("listening to channel %q: %w", channel, err)
+		return nil, fmt.Errorf("listening to channel %q: %w", channel, err)
 	}
 
 	notifs := listener.NotificationChannel()
@@ -114,10 +115,10 @@ func ListenForNotificationsAsDeliveries(
 
 				err := toDeliveries(ctx, (*PQNotification)(notif), deliveries)
 				if err != nil {
-					return xerrors.Errorf("mapping Postgres notification to deliveries: %w", err)
+					return fmt.Errorf("mapping Postgres notification to deliveries: %w", err)
 				}
 			case err := <-listener.errEvent:
-				return xerrors.Errorf("notifications listener connection: %w", err)
+				return fmt.Errorf("notifications listener connection: %w", err)
 			}
 		}
 	}, nil
@@ -152,20 +153,20 @@ func (sq SubscriptionQueries) FetchIncomingRows(
 	// to it if that happens and avoid invalidating the transaction.
 	_, err := tx.Exec(ctx, "SAVEPOINT before_incoming_rows;")
 	if err != nil {
-		return xerrors.Errorf("declaring savepoint: %w", err)
+		return fmt.Errorf("declaring savepoint: %w", err)
 	}
 
 	const cursorName = "incoming_rows"
 
 	_, err = tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+onLock, args...)
 	if err != nil {
-		return xerrors.Errorf("declaring cursor %q: %w", cursorName, err)
+		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
 
 	err = iterCursor(ctx, into, tx, cursorName)
 	if err != nil {
 		var pqErr *pq.Error
-		if !xerrors.As(err, &pqErr) || pqErr.Code != "55P03" {
+		if !errors.As(err, &pqErr) || pqErr.Code != "55P03" {
 			return err
 		}
 		// The rows were already locked, which means that someone is already
@@ -173,7 +174,7 @@ func (sq SubscriptionQueries) FetchIncomingRows(
 
 		_, err = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT before_incoming_rows;")
 		if err != nil {
-			return xerrors.Errorf("rolling back to savepoint: %w", err)
+			return fmt.Errorf("rolling back to savepoint: %w", err)
 		}
 	}
 
@@ -196,7 +197,7 @@ func (sq SubscriptionQueries) FetchPendingRows(
 
 	_, err := tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+maybeSkipLocked, args...)
 	if err != nil {
-		return xerrors.Errorf("declaring cursor %q: %w", cursorName, err)
+		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
 
 	return iterCursor(ctx, into, tx, cursorName)
@@ -238,7 +239,7 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 			// a bool.
 			rows, err := tx.Query(ctx, "FETCH NEXT FROM "+cursor)
 			if err != nil {
-				iterErr <- xerrors.Errorf("fetching next from cursor: %w", err)
+				iterErr <- fmt.Errorf("fetching next from cursor: %w", err)
 				done.store(true)
 				return false, nil
 			}
@@ -251,7 +252,7 @@ func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor st
 				rows.Close()
 				err := rows.Err()
 				if err != nil {
-					iterErr <- xerrors.Errorf("iterating rows: %w", err)
+					iterErr <- fmt.Errorf("iterating rows: %w", err)
 					done.store(true)
 				}
 

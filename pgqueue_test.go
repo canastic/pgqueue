@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"gitlab.com/canastic/chantest"
 	"gitlab.com/canastic/pgqueue/stopcontext"
-	"golang.org/x/xerrors"
 )
 
 func TestSubscribe(t *testing.T) {
@@ -189,7 +188,7 @@ func TestErrorOnInsert(t *testing.T) {
 	defer assertMock(t)
 
 	_, err := Subscribe(context.Background(), driver)
-	assert.True(t, xerrors.Is(err, expectedErr), err)
+	assert.True(t, errors.Is(err, expectedErr), err)
 }
 
 func TestErrorOnListen(t *testing.T) {
@@ -204,7 +203,7 @@ func TestErrorOnListen(t *testing.T) {
 	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
-	assert.True(t, xerrors.Is(err, expectedErr), err)
+	assert.True(t, errors.Is(err, expectedErr), err)
 }
 
 func TestErrorOnFetchPending(t *testing.T) {
@@ -226,7 +225,7 @@ func TestErrorOnFetchPending(t *testing.T) {
 	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
-	assert.True(t, xerrors.Is(err, expectedErr), err)
+	assert.True(t, errors.Is(err, expectedErr), err)
 }
 
 func TestErrorOnAccept(t *testing.T) {
@@ -247,7 +246,7 @@ func TestErrorOnAccept(t *testing.T) {
 	consume, err := Subscribe(context.Background(), driver)
 	assert.NoError(t, err)
 	err = consume(context.Background(), nil)
-	assert.True(t, xerrors.Is(err, expectedErr), err)
+	assert.True(t, errors.Is(err, expectedErr), err)
 }
 
 func TestErrorOnUnwrap(t *testing.T) {
@@ -286,7 +285,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 	err = consume(context.Background(), func() (unwrapInto interface{}, handle HandleFunc) {
 		return nil, nil
 	})
-	assert.True(t, xerrors.Is(err, expectedErr), err)
+	assert.True(t, errors.Is(err, expectedErr), err)
 }
 
 func TestErrorOnAckError(t *testing.T) {
@@ -341,7 +340,7 @@ func TestErrorOnAckError(t *testing.T) {
 				return ctx, ack
 			}
 		})
-		assert.True(t, xerrors.Is(err, expectedErr), err)
+		assert.True(t, errors.Is(err, expectedErr), err)
 	}
 
 	for _, ack := range []Ack{OK, Requeue} {
@@ -388,7 +387,7 @@ func ErrorOnRequeue(t *testing.T) {
 			return ctx, Requeue
 		}
 	})
-	assert.True(t, xerrors.Is(err, ErrRequeued), err)
+	assert.True(t, errors.Is(err, ErrRequeued), err)
 }
 
 type fakeMessage struct {

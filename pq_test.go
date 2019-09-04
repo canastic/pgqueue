@@ -3,6 +3,7 @@ package pgqueue
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -16,7 +17,6 @@ import (
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
 	"gitlab.com/canastic/ulidx"
-	"golang.org/x/xerrors"
 )
 
 var (
@@ -382,7 +382,7 @@ func (drv testPQSubscriptionDriver) fetchDeliveries(
 ) error {
 	tx, err := drv.db.BeginTx(ctx, nil)
 	if err != nil {
-		return xerrors.Errorf("beginning transaction: %w", err)
+		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
 	rows := make(chan ScanFunc)
@@ -395,14 +395,14 @@ func (drv testPQSubscriptionDriver) fetchDeliveries(
 		defer stop()
 		return drv.rowsToDeliveries(ctx, tx, deliveries, rows)
 	})
-	if err != nil && !xerrors.Is(err, context.Canceled) {
+	if err != nil && !errors.Is(err, context.Canceled) {
 		tx.Rollback()
 		return err
 	}
 
 	err = tx.Commit()
 	if err != nil {
-		return xerrors.Errorf("committing transaction: %w", err)
+		return fmt.Errorf("committing transaction: %w", err)
 	}
 
 	return nil
@@ -415,7 +415,7 @@ func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sql
 
 		ok, err := scanRow(&serial, &payload)
 		if err != nil {
-			return xerrors.Errorf("scanning delivery: %w", err)
+			return fmt.Errorf("scanning delivery: %w", err)
 		}
 		if !ok {
 			continue
@@ -428,7 +428,7 @@ func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sql
 				AND subscription = $2
 		`, serial, drv.name)
 		if err != nil {
-			return xerrors.Errorf("marking as delivered: %w", err)
+			return fmt.Errorf("marking as delivered: %w", err)
 		}
 
 		acked := make(chan struct{}, 1)
@@ -484,7 +484,7 @@ var nextSerial int64
 func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return xerrors.Errorf("beginning transaction: %w", err)
+		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
 	msgSerial := nextSerial
@@ -495,7 +495,7 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 		SELECT name FROM subscriptions;
 	`)
 	if err != nil {
-		return xerrors.Errorf("selecting subscriptions: %w", err)
+		return fmt.Errorf("selecting subscriptions: %w", err)
 	}
 	defer tx.Exec(ctx, `CLOSE subscriptions_cursor;`)
 
@@ -503,10 +503,10 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 		var sub string
 		err := tx.QueryRow(ctx, `FETCH NEXT FROM subscriptions_cursor;`).Scan(&sub)
 		if err != nil {
-			if xerrors.Is(err, sql.ErrNoRows) {
+			if errors.Is(err, sql.ErrNoRows) {
 				break
 			}
-			return xerrors.Errorf("scanning subscription name: %w", err)
+			return fmt.Errorf("scanning subscription name: %w", err)
 		}
 
 		_, err = tx.Exec(ctx,
@@ -514,7 +514,7 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 			msgSerial, sub, payload,
 		)
 		if ignoreUniqueViolation(err) != nil {
-			return xerrors.Errorf("inserting pending delivery for subscription %q and message %d: %w", sub, msgSerial, err)
+			return fmt.Errorf("inserting pending delivery for subscription %q and message %d: %w", sub, msgSerial, err)
 		}
 	}
 
@@ -524,7 +524,7 @@ func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
 func ignoreUniqueViolation(err error) error {
 	var pqErr *pq.Error
 	const uniqueViolation = "23505"
-	if xerrors.As(err, &pqErr) && pqErr.Code == uniqueViolation {
+	if errors.As(err, &pqErr) && pqErr.Code == uniqueViolation {
 		err = nil
 	}
 	return err
