@@ -12,6 +12,8 @@ github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+
 github.com/stretchr/testify v1.3.0 h1:TivCn/peBQ7UY8ooIcPgZFpTNSz0Q2U6UrFlUfqbe0Q=
 github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
 github.com/tcard/gock v0.1.1/go.mod h1:dc7/gtKnSdkyWtIgbV2RCL9/XksFpZzbVzZfSxeHH34=
+github.com/tcard/gock v0.1.2 h1:5Lvo9qjrb9jEpT8Jp8WbVs2tQc2o95c3miOuUtz9QPc=
+github.com/tcard/gock v0.1.2/go.mod h1:dc7/gtKnSdkyWtIgbV2RCL9/XksFpZzbVzZfSxeHH34=
 gitlab.com/canastic/chantest v0.1.0 h1:hr0WUmdZEcn3BmovB19XoX4/A7n/FkXiXKDLKDOMOww=
 gitlab.com/canastic/chantest v0.1.0/go.mod h1:jCARv5p1UgAP4J+z7vF/kdO47tctzARlwkdjBgtWNyw=
 gitlab.com/canastic/hencelog v0.0.0-20190724154332-53edc755f516 h1:bmJJZiOiet7qujPqJSiogMozLWHua11X5TWOmdIa00U=
