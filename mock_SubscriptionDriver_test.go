@@ -24,7 +24,7 @@ import (
 type SubscriptionDriverMocker struct {
 	FetchPendingDeliveries func(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)
 	InsertSubscription     func(a0 context.Context) (r0 error)
-	ListenForDeliveries    func(a0 context.Context) (r0 AcceptFunc, r1 error)
+	ListenForDeliveries    func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error)
 }
 
 // Describe lets you describe how the methods on the resulting mock are expected
@@ -193,7 +193,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			desc := desc
 			calls := 0
 			prev := desc.call
-			desc.call = func(a0 context.Context) (r0 AcceptFunc, r1 error) {
+			desc.call = func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error) {
 				calls++
 				return prev(a0)
 			}
@@ -205,7 +205,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 				return "", nil
 			})
 		}
-		d.m.ListenForDeliveries = func(a0 context.Context) (r0 AcceptFunc, r1 error) {
+		d.m.ListenForDeliveries = func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error) {
 			var matching []*SubscriptionDriverListenForDeliveriesMockDescriptor
 			var allErrs []specErrs
 			for _, desc := range d.descriptors_ListenForDeliveries {
@@ -243,7 +243,7 @@ func (d SubscriptionDriverMockDescriptor) done() func(t interface {
 			panic(fmt.Errorf("more than one candidate for call to mock for SubscriptionDriver.ListenForDeliveries with args:\n\n\t%+v\n\nmatching candidates:\n%s", args, matchingLines))
 		}
 	} else {
-		d.m.ListenForDeliveries = func(a0 context.Context) (r0 AcceptFunc, r1 error) {
+		d.m.ListenForDeliveries = func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error) {
 			panic("unexpected call to mock for SubscriptionDriver.ListenForDeliveries")
 		}
 	}
@@ -697,7 +697,7 @@ type SubscriptionDriverListenForDeliveriesMockDescriptor struct {
 	mockDesc     SubscriptionDriverMockDescriptor
 	times        func(int) error
 	argValidator func(got_a0 context.Context) []string
-	call         func(a0 context.Context) (r0 AcceptFunc, r1 error)
+	call         func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error)
 	fileLine     string
 }
 
@@ -756,8 +756,8 @@ type SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg struct {
 
 // Returns lets you specify the values that the mocked method SubscriptionDriver.ListenForDeliveries,
 // if called with values matching the expectations, will return.
-func (d SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg) Returns(r0 AcceptFunc, r1 error) SubscriptionDriverListenForDeliveriesMockDescriptorWithReturn {
-	return d.ReturnsFrom(func(context.Context) (AcceptFunc, error) {
+func (d SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg) Returns(r0 func(stopcontext.Context, chan<- Delivery) error, r1 error) SubscriptionDriverListenForDeliveriesMockDescriptorWithReturn {
+	return d.ReturnsFrom(func(context.Context) (func(stopcontext.Context, chan<- Delivery) error, error) {
 		return r0, r1
 	})
 }
@@ -766,7 +766,7 @@ func (d SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg) Returns(r0 
 // if called with values matching the expectations, will return.
 //
 // It passes such passed values to a function that then returns the return values.
-func (d SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg) ReturnsFrom(f func(a0 context.Context) (r0 AcceptFunc, r1 error)) SubscriptionDriverListenForDeliveriesMockDescriptorWithReturn {
+func (d SubscriptionDriverListenForDeliveriesMockDescriptorWith1Arg) ReturnsFrom(f func(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error)) SubscriptionDriverListenForDeliveriesMockDescriptorWithReturn {
 	d.methodDesc.call = f
 	return SubscriptionDriverListenForDeliveriesMockDescriptorWithReturn{d.methodDesc}
 }
@@ -872,7 +872,7 @@ func (m _makegomock_SubscriptionDriverMockFromMocker) InsertSubscription(a0 cont
 	return m.m.InsertSubscription(a0)
 }
 
-func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 context.Context) (r0 AcceptFunc, r1 error) {
+func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error) {
 	return m.m.ListenForDeliveries(a0)
 }
 
@@ -883,5 +883,5 @@ func (m _makegomock_SubscriptionDriverMockFromMocker) ListenForDeliveries(a0 con
 type SubscriptionDriverMock interface {
 	FetchPendingDeliveries(a0 stopcontext.Context, a1 chan<- Delivery) (r0 error)
 	InsertSubscription(a0 context.Context) (r0 error)
-	ListenForDeliveries(a0 context.Context) (r0 AcceptFunc, r1 error)
+	ListenForDeliveries(a0 context.Context) (r0 func(stopcontext.Context, chan<- Delivery) error, r1 error)
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/tcard/gock"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
 )
@@ -83,12 +84,13 @@ func (l *Listener) Listen(ctx context.Context, channel string) error {
 	return err
 }
 
-func ListenForNotificationsAsDeliveries(
+type AcceptPQNotificationsFunc = func(stopcontext.Context, chan<- *pq.Notification) error
+
+func ListenForNotifications(
 	ctx context.Context,
 	listener *Listener,
 	channel string,
-	toDeliveries func(stopcontext.Context, *PQNotification, chan<- Delivery) error,
-) (AcceptFunc, error) {
+) (AcceptPQNotificationsFunc, error) {
 	err := listener.Listen(ctx, channel)
 	if err != nil {
 		return nil, fmt.Errorf("listening to channel %q: %w", channel, err)
@@ -96,7 +98,7 @@ func ListenForNotificationsAsDeliveries(
 
 	notifs := listener.NotificationChannel()
 
-	return func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
+	return func(ctx stopcontext.Context, into chan<- *pq.Notification) error {
 		defer listener.Unlisten(channel)
 		for {
 			select {
@@ -105,20 +107,24 @@ func ListenForNotificationsAsDeliveries(
 			default:
 			}
 
+			var notif *pq.Notification
+
+			var ok bool
 			select {
 			case <-ctx.Stopped():
 				return ctx.Err()
-			case notif, ok := <-notifs:
+			case notif, ok = <-notifs:
 				if !ok {
 					return nil
 				}
-
-				err := toDeliveries(ctx, (*PQNotification)(notif), deliveries)
-				if err != nil {
-					return fmt.Errorf("mapping Postgres notification to deliveries: %w", err)
-				}
 			case err := <-listener.errEvent:
 				return fmt.Errorf("notifications listener connection: %w", err)
+			}
+
+			select {
+			case <-ctx.Stopped():
+				return ctx.Err()
+			case into <- notif:
 			}
 		}
 	}, nil
@@ -133,11 +139,7 @@ var (
 	Unordered = OrderGuarantee{ordered: false}
 )
 
-type SubscriptionQueries struct {
-	Ordered OrderGuarantee
-}
-
-func (sq SubscriptionQueries) FetchIncomingRows(
+func (o OrderGuarantee) FetchIncomingRows(
 	ctx context.Context,
 	tx sqlx.Tx,
 	into chan<- ScanFunc,
@@ -145,7 +147,7 @@ func (sq SubscriptionQueries) FetchIncomingRows(
 	args ...interface{},
 ) error {
 	onLock := " NOWAIT"
-	if !sq.Ordered.ordered {
+	if !o.ordered {
 		onLock = " SKIP LOCKED"
 	}
 
@@ -181,7 +183,7 @@ func (sq SubscriptionQueries) FetchIncomingRows(
 	return nil
 }
 
-func (sq SubscriptionQueries) FetchPendingRows(
+func (o OrderGuarantee) FetchPendingRows(
 	ctx context.Context,
 	tx sqlx.Tx,
 	into chan<- ScanFunc,
@@ -189,7 +191,7 @@ func (sq SubscriptionQueries) FetchPendingRows(
 	args ...interface{},
 ) error {
 	maybeSkipLocked := ""
-	if !sq.Ordered.ordered {
+	if !o.ordered {
 		maybeSkipLocked = " SKIP LOCKED"
 	}
 
@@ -286,4 +288,144 @@ func (b *atomicBool) store(v bool) {
 
 func (b *atomicBool) load() bool {
 	return atomic.LoadUintptr((*uintptr)(b)) > 0
+}
+
+type AcceptQueriesFunc = func(stopcontext.Context, chan<- QueryWithArgs) error
+
+type PQSubscriptionDriver struct {
+	DB                           sqlx.DB
+	ExecInsertSubscription       func(context.Context) error
+	ListenForIncomingBaseQueries func(context.Context) (AcceptQueriesFunc, error)
+	PendingBaseQuery             QueryWithArgs
+	RowsToDeliveries             func(context.Context, sqlx.Tx, chan<- Delivery, <-chan ScanFunc) error
+	Ordered                      OrderGuarantee
+}
+
+func (drv PQSubscriptionDriver) InsertSubscription(ctx context.Context) error {
+	return drv.ExecInsertSubscription(ctx)
+}
+
+type QueryWithArgs struct {
+	Query string
+	Args  []interface{}
+}
+
+func NewQueryWithArgs(query string, args ...interface{}) QueryWithArgs {
+	return QueryWithArgs{Query: query, Args: args}
+}
+
+func (drv PQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
+	acceptIncoming, err := drv.ListenForIncomingBaseQueries(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	return func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
+		ctx, stop := stopcontext.WithStop(ctx)
+		baseQueries := make(chan QueryWithArgs)
+		return gock.Wait(func() error {
+			defer close(baseQueries)
+			return acceptIncoming(ctx, baseQueries)
+		}, func() error {
+			defer stop()
+			for baseQuery := range baseQueries {
+				err := drv.fetchDeliveries(ctx, deliveries, drv.Ordered.FetchIncomingRows, baseQuery.Query, baseQuery.Args...)
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	}, nil
+}
+
+func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
+	q := drv.PendingBaseQuery
+	return drv.fetchDeliveries(ctx, deliveries, drv.Ordered.FetchPendingRows, q.Query, q.Args...)
+}
+
+type fetchFunc = func(
+	ctx context.Context,
+	tx sqlx.Tx,
+	into chan<- ScanFunc,
+	baseQuery string,
+	args ...interface{},
+) error
+
+func (drv PQSubscriptionDriver) fetchDeliveries(
+	ctx stopcontext.Context,
+	deliveries chan<- Delivery,
+	fetch fetchFunc,
+	query string,
+	args ...interface{},
+) error {
+	tx, err := drv.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("beginning transaction: %w", err)
+	}
+
+	rows := make(chan ScanFunc)
+	ctx, stop := stopcontext.WithStop(ctx)
+
+	err = gock.Wait(func() error {
+		defer close(rows)
+		return fetch(ctx, tx, rows, query, args...)
+	}, func() error {
+		defer stop()
+		return drv.rowsToDeliveries(ctx, tx, deliveries, rows)
+	})
+	if err != nil && !errors.Is(err, context.Canceled) {
+		tx.Rollback()
+		return err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		return fmt.Errorf("committing transaction: %w", err)
+	}
+
+	return nil
+}
+
+func (drv PQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, deliveries chan<- Delivery, rows <-chan ScanFunc) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	deliveriesFromRows := make(chan Delivery)
+	return gock.Wait(func() error {
+		defer close(deliveriesFromRows)
+		return drv.RowsToDeliveries(ctx, tx, deliveriesFromRows, rows)
+	}, func() error {
+		defer cancel()
+		for d := range deliveriesFromRows {
+			acked := make(chan struct{}, 1)
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case deliveries <- drv.deliverySendingAckedSignal(tx, d, acked):
+			}
+
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-acked:
+			}
+		}
+		return nil
+	})
+}
+
+func (drv PQSubscriptionDriver) deliverySendingAckedSignal(tx sqlx.Tx, d Delivery, acked chan<- struct{}) Delivery {
+	return Delivery{
+		Unwrap: d.Unwrap,
+		OK: func(ctx context.Context) error {
+			defer close(acked)
+			return d.OK(ctx)
+		},
+		Requeue: func(ctx context.Context) error {
+			defer close(acked)
+			return d.Requeue(ctx)
+		},
+	}
 }

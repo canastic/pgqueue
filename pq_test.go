@@ -321,94 +321,64 @@ type testConsumer struct {
 // TODO: Exhaustive failure and concurrency tests.
 
 type testPQSubscriptionDriver struct {
-	db      sqlx.DB
-	l       *Listener
-	name    string
-	queries SubscriptionQueries
+	db   sqlx.DB
+	l    *Listener
+	name string
 }
 
-func newTestPQSubscriptionDriver(db sqlx.DB, l *Listener, name string, ordered OrderGuarantee) testPQSubscriptionDriver {
-	return testPQSubscriptionDriver{
-		db:      db,
-		l:       l,
-		name:    name,
-		queries: SubscriptionQueries{Ordered: ordered},
+func newTestPQSubscriptionDriver(db sqlx.DB, l *Listener, name string, ordered OrderGuarantee) PQSubscriptionDriver {
+	drv := testPQSubscriptionDriver{
+		db:   db,
+		l:    l,
+		name: name,
+	}
+	return PQSubscriptionDriver{
+		DB:                           db,
+		ExecInsertSubscription:       drv.ExecInsertSubscription,
+		ListenForIncomingBaseQueries: drv.ListenForIncomingBaseQueries,
+		PendingBaseQuery: NewQueryWithArgs(`
+			SELECT serial, payload
+			FROM message_deliveries m
+			WHERE
+				subscription = $1
+			ORDER BY serial
+		`, name),
+		RowsToDeliveries: drv.RowsToDeliveries,
+		Ordered:          ordered,
 	}
 }
 
-func (drv testPQSubscriptionDriver) InsertSubscription(ctx context.Context) error {
+func (drv testPQSubscriptionDriver) ExecInsertSubscription(ctx context.Context) error {
 	_, err := drv.db.Exec(ctx, "INSERT INTO subscriptions (name) VALUES ($1);", drv.name)
 	return ignoreUniqueViolation(err)
 }
 
-func (drv testPQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
-	return ListenForNotificationsAsDeliveries(ctx, drv.l, fmt.Sprintf("message:%s", drv.name), drv.notifToDeliveries)
-}
-
-func (drv testPQSubscriptionDriver) notifToDeliveries(ctx stopcontext.Context, notif *PQNotification, deliveries chan<- Delivery) error {
-	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchIncomingRows, `
-		SELECT serial, payload
-		FROM message_deliveries m
-		WHERE
-			subscription = $1
-		ORDER BY serial
-	`, drv.name)
-}
-
-func (drv testPQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
-	return drv.fetchDeliveries(ctx, deliveries, drv.queries.FetchPendingRows, `
-		SELECT serial, payload
-		FROM message_deliveries m
-		WHERE
-			subscription = $1
-		ORDER BY serial
-	`, drv.name)
-}
-
-type fetchFunc = func(
-	ctx context.Context,
-	tx sqlx.Tx,
-	into chan<- ScanFunc,
-	baseQuery string,
-	args ...interface{},
-) error
-
-func (drv testPQSubscriptionDriver) fetchDeliveries(
-	ctx stopcontext.Context,
-	deliveries chan<- Delivery,
-	fetch fetchFunc,
-	query string,
-	args ...interface{},
-) error {
-	tx, err := drv.db.BeginTx(ctx, nil)
+func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Context) (AcceptQueriesFunc, error) {
+	acceptNotifs, err := ListenForNotifications(ctx, drv.l, fmt.Sprintf("message:%s", drv.name))
 	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
+		return nil, fmt.Errorf("listening for notifications: %w", err)
 	}
-
-	rows := make(chan ScanFunc)
-	ctx, stop := stopcontext.WithStop(ctx)
-
-	err = gock.Wait(func() error {
-		defer close(rows)
-		return fetch(ctx, tx, rows, query, args...)
-	}, func() error {
-		defer stop()
-		return drv.rowsToDeliveries(ctx, tx, deliveries, rows)
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		tx.Rollback()
-		return err
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-
-	return nil
+	return func(ctx stopcontext.Context, baseQueries chan<- QueryWithArgs) error {
+		notifs := make(chan *pq.Notification)
+		return gock.Wait(func() error {
+			defer close(notifs)
+			return acceptNotifs(ctx, notifs)
+		}, func() error {
+			for range notifs {
+				baseQueries <- NewQueryWithArgs(`
+					SELECT serial, payload
+					FROM message_deliveries m
+					WHERE
+						subscription = $1
+					ORDER BY serial
+				`, drv.name)
+			}
+			return nil
+		})
+	}, nil
 }
 
-func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, deliveries chan<- Delivery, rows <-chan ScanFunc) error {
+func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sqlx.Tx, deliveries chan<- Delivery, rows <-chan ScanFunc) error {
 	for scanRow := range rows {
 		var serial int64
 		var payload string
@@ -422,61 +392,41 @@ func (drv testPQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sql
 		}
 
 		_, err = tx.Exec(ctx, `
-			UPDATE message_deliveries SET `+MarkAsDeliveredSQL+`
-			WHERE
-				serial = $1
-				AND subscription = $2
-		`, serial, drv.name)
+					UPDATE message_deliveries SET `+MarkAsDeliveredSQL+`
+					WHERE
+						serial = $1
+						AND subscription = $2
+				`, serial, drv.name)
 		if err != nil {
 			return fmt.Errorf("marking as delivered: %w", err)
 		}
 
-		acked := make(chan struct{}, 1)
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case deliveries <- drv.toDelivery(tx, serial, payload, acked):
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-acked:
+		deliveries <- Delivery{
+			Unwrap: func(into interface{}) error {
+				*(into.(*string)) = payload
+				return nil
+			},
+			OK: func(ctx context.Context) error {
+				_, err := tx.Exec(ctx, `
+						DELETE FROM message_deliveries
+						WHERE
+							serial = $1
+							AND subscription = $2
+					`, serial, drv.name)
+				return err
+			},
+			Requeue: func(ctx context.Context) error {
+				_, err := tx.Exec(ctx, `
+						UPDATE message_deliveries SET `+UpdateLastAckSQL+`
+						WHERE
+							serial = $1
+							AND subscription = $2
+					`, serial, drv.name)
+				return err
+			},
 		}
 	}
 	return nil
-}
-
-func (drv testPQSubscriptionDriver) toDelivery(tx sqlx.Tx, serial int64, payload string, acked chan<- struct{}) Delivery {
-	return Delivery{
-		Unwrap: func(into interface{}) error {
-			*(into.(*string)) = payload
-			return nil
-		},
-		OK: func(ctx context.Context) error {
-			defer close(acked)
-
-			_, err := tx.Exec(ctx, `
-				DELETE FROM message_deliveries
-				WHERE
-					serial = $1
-					AND subscription = $2
-			`, serial, drv.name)
-			return err
-		},
-		Requeue: func(ctx context.Context) error {
-			defer close(acked)
-
-			_, err := tx.Exec(ctx, `
-				UPDATE message_deliveries SET `+UpdateLastAckSQL+`
-				WHERE
-					serial = $1
-					AND subscription = $2
-			`, serial, drv.name)
-			return err
-		},
-	}
 }
 
 var nextSerial int64

@@ -120,7 +120,7 @@ type SubscriptionDriver interface {
 	FetchPendingDeliveries(stopcontext.Context, chan<- Delivery) error
 }
 
-type AcceptFunc func(stopcontext.Context, chan<- Delivery) error
+type AcceptFunc = func(stopcontext.Context, chan<- Delivery) error
 
 // A Delivery is an attempted delivery of a message.
 type Delivery struct {
