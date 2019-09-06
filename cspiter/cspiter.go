@@ -35,8 +35,7 @@ type Receives struct {
 func (r Receives) StartPull() (ready <-chan bool) {
 	select {
 	case <-r.Closed:
-	default:
-		r.Pulls <- struct{}{}
+	case r.Pulls <- struct{}{}:
 	}
 	return r.Ready
 }

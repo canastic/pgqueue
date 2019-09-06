@@ -4,7 +4,7 @@ import (
 	"testing"
 )
 
-func TestEmpty(t *testing.T) {
+func TestEmptyBeforePullStarts(t *testing.T) {
 	var foo Foo
 	sends, receives := NewFooIterator(&foo)
 
@@ -13,5 +13,28 @@ func TestEmpty(t *testing.T) {
 	for receives.Pull() {
 		t.Error("unexpected pull for closed iterator")
 	}
+	receives.Done()
+}
+
+func TestEmptyAfterPullStarts(t *testing.T) {
+	var foo Foo
+	sends, receives := NewFooIterator(&foo)
+
+	readyChan := make(chan (<-chan bool))
+	go func() {
+		readyChan <- receives.StartPull()
+	}()
+
+	sends.Done()
+
+	ready := <-readyChan
+
+	select {
+	case ready := <-ready:
+		if ready {
+			t.Error("unexpected pull for closed iterator")
+		}
+	}
+
 	receives.Done()
 }
