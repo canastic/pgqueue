@@ -59,7 +59,7 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 		return ok
 	}
 
-	runtime.SetFinalizer(&resume, func(interface{}) {
+	runtime.SetFinalizer(&resume, func(resume interface{}) {
 		close(garbageCollected)
 	})
 
@@ -67,7 +67,7 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 		select {
 		case yieldCh <- struct{}{}:
 		case <-garbageCollected:
-			panic(ErrLeak)
+			panic(ErrKilled{ErrLeak})
 		case <-options.killCtx.Done():
 			panic(ErrKilled{options.killCtx.Err()})
 		}
@@ -107,7 +107,7 @@ type ErrKilled struct {
 }
 
 func (err ErrKilled) Error() string {
-	return fmt.Errorf("coro: coroutine killed by context done: %w", err.By).Error()
+	return fmt.Errorf("coro: coroutine killed: %w", err.By).Error()
 }
 
 func (err ErrKilled) Unwrap() error {
