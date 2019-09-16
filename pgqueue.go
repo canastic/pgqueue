@@ -9,6 +9,7 @@ import (
 	"runtime/debug"
 
 	"github.com/tcard/gock"
+	"gitlab.com/canastic/pgqueue/coro"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 
@@ -26,41 +27,57 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 	}
 
 	return func(ctx context.Context, getHandler GetHandler) (err error) {
-		defer catchPanic(&err)
-
 		acceptIncoming, err := driver.ListenForDeliveries(ctx)
 		if err != nil {
 			return fmt.Errorf("listening for deliveries: %w", err)
 		}
 
-		deliveries := make(chan Delivery)
+		g, wait := gock.Bundle()
+		defer wait()
 
-		stopCtx, stop := stopcontext.WithStop(ctx)
+		g = panicAsError(g)
 
-		return gock.Wait(func() error {
-			defer stop()
-			for d := range deliveries {
-				err := handleDelivery(ctx, d, getHandler)
-				if err != nil {
-					return fmt.Errorf("handling delivery: %w", err)
-				}
-			}
-			return nil
-		}, func() error {
-			defer close(deliveries)
+		coroCtx, cancel := context.WithCancel(ctx)
 
-			err := driver.FetchPendingDeliveries(stopCtx, deliveries)
+		deliveries := NewDeliveryIterator(g, func(yield func(Delivery)) error {
+			err := driver.FetchPendingDeliveries(ctx, yield)
 			if err != nil {
 				return fmt.Errorf("fetching pending deliveries: %w", err)
 			}
 
-			err = acceptIncoming(stopCtx, deliveries)
+			err = acceptIncoming(ctx, yield)
 			if err != nil {
 				return fmt.Errorf("accepting incoming deliveries: %w", err)
 			}
 
 			return nil
+		}, coro.KillOnContextDone(coroCtx))
+
+		g(func() error {
+			defer cancel()
+			for {
+				// Prioritize the stop signal, so that the client can be
+				// guaranteed that the handler won't be called anymore by
+				// stopping the context before ACKing the last delivery
+				// received.
+				select {
+				case <-stopcontext.Stopped(ctx):
+					return ctx.Err()
+				default:
+				}
+
+				if !deliveries.Next() {
+					return nil
+				}
+
+				err := handleDelivery(ctx, deliveries.Yielded, getHandler)
+				if err != nil {
+					return fmt.Errorf("handling delivery: %w", err)
+				}
+			}
 		})
+
+		return wait()
 	}, nil
 }
 
@@ -70,6 +87,7 @@ var ErrRequeued = errors.New("a message was requeued; redelivery not guaranteed 
 
 func handleDelivery(ctx context.Context, d Delivery, getHandler GetHandler) (err error) {
 	ack := Requeue
+
 	defer func() {
 		ackErr := d.Ack(ctx, ack)
 
@@ -117,10 +135,10 @@ type HandleFunc = func(context.Context) (context.Context, Ack)
 type SubscriptionDriver interface {
 	InsertSubscription(context.Context) error
 	ListenForDeliveries(context.Context) (AcceptFunc, error)
-	FetchPendingDeliveries(stopcontext.Context, chan<- Delivery) error
+	FetchPendingDeliveries(context.Context, func(Delivery)) error
 }
 
-type AcceptFunc = func(stopcontext.Context, chan<- Delivery) error
+type AcceptFunc = func(context.Context, func(Delivery)) error
 
 // A Delivery is an attempted delivery of a message.
 type Delivery struct {
@@ -189,8 +207,15 @@ func (p Panic) Unwrap() error {
 	}
 }
 
-func catchPanic(err *error) {
-	if r := recover(); r != nil {
-		*err = Panic{r, debug.Stack()}
+func panicAsError(g func(func() error)) func(func() error) {
+	return func(f func() error) {
+		g(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = Panic{r, debug.Stack()}
+				}
+			}()
+			return f()
+		})
 	}
 }

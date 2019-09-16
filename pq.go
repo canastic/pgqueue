@@ -4,23 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
 	"time"
 
 	"github.com/lib/pq"
 	"github.com/tcard/gock"
+	"gitlab.com/canastic/pgqueue/coro"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
 )
-
-type PQNotification struct {
-	// Process ID (PID) of the notifying postgres backend.
-	BePid int
-	// Name of the channel the notification was sent on.
-	Channel string
-	// Payload, or the empty string if unspecified.
-	Extra string
-}
 
 type PQListener interface {
 	Listen(channel string) error
@@ -36,15 +27,6 @@ type Listener struct {
 	errEvent <-chan error
 }
 
-var pqNewListener = func(
-	name string,
-	minReconnectInterval time.Duration,
-	maxReconnectInterval time.Duration,
-	eventCallback pq.EventCallbackType,
-) PQListener {
-	return pq.NewListener(name, minReconnectInterval, maxReconnectInterval, eventCallback)
-}
-
 func NewListener(
 	name string,
 	minReconnectInterval time.Duration,
@@ -54,7 +36,7 @@ func NewListener(
 	errEvent := make(chan error, 1)
 	gotErrEvent := false
 	return &Listener{
-		PQListener: pqNewListener(name, minReconnectInterval, maxReconnectInterval, func(event pq.ListenerEventType, err error) {
+		PQListener: pq.NewListener(name, minReconnectInterval, maxReconnectInterval, func(event pq.ListenerEventType, err error) {
 			if !gotErrEvent {
 				switch event {
 				case pq.ListenerEventDisconnected, pq.ListenerEventConnectionAttemptFailed:
@@ -69,22 +51,20 @@ func NewListener(
 	}
 }
 
-var timeSleep = time.Sleep
-
 func (l *Listener) Listen(ctx context.Context, channel string) error {
 	listenErr := make(chan error, 1)
 	go func() { listenErr <- l.PQListener.Listen(channel) }()
 
 	var err error
 	select {
-	case <-stopcontext.Stopped(ctx):
+	case <-ctx.Done():
 		err = ctx.Err()
 	case err = <-listenErr:
 	}
 	return err
 }
 
-type AcceptPQNotificationsFunc = func(stopcontext.Context, chan<- *pq.Notification) error
+type AcceptPQNotificationsFunc = func(context.Context, func(*pq.Notification)) error
 
 func ListenForNotifications(
 	ctx context.Context,
@@ -98,33 +78,19 @@ func ListenForNotifications(
 
 	notifs := listener.NotificationChannel()
 
-	return func(ctx stopcontext.Context, into chan<- *pq.Notification) error {
+	return func(ctx context.Context, yield func(*pq.Notification)) error {
 		defer listener.Unlisten(channel)
 		for {
 			select {
-			case <-ctx.Stopped():
+			case <-stopcontext.Stopped(ctx):
 				return ctx.Err()
-			default:
-			}
-
-			var notif *pq.Notification
-
-			var ok bool
-			select {
-			case <-ctx.Stopped():
-				return ctx.Err()
-			case notif, ok = <-notifs:
+			case notif, ok := <-notifs:
 				if !ok {
 					return nil
 				}
+				yield(notif)
 			case err := <-listener.errEvent:
 				return fmt.Errorf("notifications listener connection: %w", err)
-			}
-
-			select {
-			case <-ctx.Stopped():
-				return ctx.Err()
-			case into <- notif:
 			}
 		}
 	}, nil
@@ -142,7 +108,7 @@ var (
 func (o OrderGuarantee) FetchIncomingRows(
 	ctx context.Context,
 	tx sqlx.Tx,
-	into chan<- ScanFunc,
+	yield func(sqlx.Row),
 	baseQuery string,
 	args ...interface{},
 ) error {
@@ -165,7 +131,7 @@ func (o OrderGuarantee) FetchIncomingRows(
 		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
 
-	err = iterCursor(ctx, into, tx, cursorName)
+	err = iterCursor(ctx, yield, tx, cursorName)
 	if err != nil {
 		var pqErr *pq.Error
 		if !errors.As(err, &pqErr) || pqErr.Code != "55P03" {
@@ -186,7 +152,7 @@ func (o OrderGuarantee) FetchIncomingRows(
 func (o OrderGuarantee) FetchPendingRows(
 	ctx context.Context,
 	tx sqlx.Tx,
-	into chan<- ScanFunc,
+	yield func(sqlx.Row),
 	baseQuery string,
 	args ...interface{},
 ) error {
@@ -202,7 +168,7 @@ func (o OrderGuarantee) FetchPendingRows(
 		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
 	}
 
-	return iterCursor(ctx, into, tx, cursorName)
+	return iterCursor(ctx, yield, tx, cursorName)
 }
 
 const MarkAsDeliveredSQL string = `
@@ -214,90 +180,58 @@ const UpdateLastAckSQL string = `
 	last_ack_at = NOW() AT TIME ZONE 'UTC'
 `
 
-type ScanFunc = func(into ...interface{}) (ok bool, err error)
+func iterCursor(ctx context.Context, yield func(sqlx.Row), tx sqlx.Tx, cursor string) (err error) {
+	defer tx.Exec(ctx, "CLOSE "+cursor)
 
-func iterCursor(ctx context.Context, into chan<- ScanFunc, tx sqlx.Tx, cursor string) error {
-	var done atomicBool
-	iterErr := make(chan error, 1)
+	scanErr := make(chan error, 1)
 
-	for !done.load() {
+	for {
 		select {
 		case <-stopcontext.Stopped(ctx):
-			return ctx.Err()
 		default:
 		}
 
-		select {
-		case <-stopcontext.Stopped(ctx):
-			return ctx.Err()
-		case into <- func(into ...interface{}) (bool, error) {
-			// We defer actually querying until the ScanFunc is called.
-			// Otherwise, since the tx is shared with the receiver, there is a
-			// race between this iterator's next tx.QueryRow and the receiver's
-			// use of the tx.
-			//
-			// Unfortunately, this makes for an awkward interface because we
-			// don't know in advance if there's a next row, so ScanFunc returns
-			// a bool.
-			rows, err := tx.Query(ctx, "FETCH NEXT FROM "+cursor)
-			if err != nil {
-				iterErr <- fmt.Errorf("fetching next from cursor: %w", err)
-				done.store(true)
-				return false, nil
-			}
-			if !rows.Next() {
-				done.store(true)
-				return false, nil
-			}
+		rows, err := tx.Query(ctx, "FETCH NEXT FROM "+cursor)
+		if err != nil {
+			return fmt.Errorf("fetching next from cursor: %w", err)
+		}
+		if !rows.Next() {
+			return nil
+		}
 
-			defer func() {
-				rows.Close()
-				err := rows.Err()
-				if err != nil {
-					iterErr <- fmt.Errorf("iterating rows: %w", err)
-					done.store(true)
-				}
-
-				if done.load() {
-					tx.Exec(ctx, "CLOSE "+cursor)
-				}
-			}()
-
-			return true, rows.Scan(into...)
-		}:
+		yield(rowsCloseAfterScan{rows, scanErr})
+		if err := <-scanErr; err != nil {
+			return fmt.Errorf("scanning: %w", err)
 		}
 	}
-
-	select {
-	case err := <-iterErr:
-		return err
-	default:
-		return nil
-	}
 }
 
-type atomicBool uintptr
-
-func (b *atomicBool) store(v bool) {
-	var u uintptr = 0
-	if v {
-		u = 1
-	}
-	atomic.StoreUintptr((*uintptr)(b), u)
+type rowsCloseAfterScan struct {
+	rows sqlx.Rows
+	err  chan<- error
 }
 
-func (b *atomicBool) load() bool {
-	return atomic.LoadUintptr((*uintptr)(b)) > 0
+func (r rowsCloseAfterScan) Scan(into ...interface{}) error {
+	defer func() {
+		r.rows.Close()
+		err := r.rows.Err()
+		if err != nil {
+			r.err <- fmt.Errorf("iterating rows: %w", err)
+		}
+		r.err <- nil
+	}()
+
+	return r.rows.Scan(into...)
 }
 
-type AcceptQueriesFunc = func(stopcontext.Context, chan<- QueryWithArgs) error
+type AcceptQueriesFunc = func(context.Context, func(QueryWithArgs)) error
 
 type PQSubscriptionDriver struct {
 	DB                           sqlx.DB
 	ExecInsertSubscription       func(context.Context) error
 	ListenForIncomingBaseQueries func(context.Context) (AcceptQueriesFunc, error)
 	PendingBaseQuery             QueryWithArgs
-	RowsToDeliveries             func(context.Context, sqlx.Tx, chan<- Delivery, <-chan ScanFunc) error
+	RowsToDeliveries             func(context.Context, sqlx.Tx, func(Delivery), *RowIterator) error
 	Ordered                      OrderGuarantee
 }
 
@@ -320,41 +254,43 @@ func (drv PQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (Accept
 		return nil, err
 	}
 
-	return func(ctx stopcontext.Context, deliveries chan<- Delivery) error {
-		ctx, stop := stopcontext.WithStop(ctx)
-		baseQueries := make(chan QueryWithArgs)
-		return gock.Wait(func() error {
-			defer close(baseQueries)
-			return acceptIncoming(ctx, baseQueries)
-		}, func() error {
-			defer stop()
-			for baseQuery := range baseQueries {
-				err := drv.fetchDeliveries(ctx, deliveries, drv.Ordered.FetchIncomingRows, baseQuery.Query, baseQuery.Args...)
+	return func(ctx context.Context, yield func(Delivery)) error {
+		coroCtx, cancel := context.WithCancel(ctx)
+		g, wait := gock.Bundle()
+		queries := NewQueryWithArgsIterator(g, func(yield func(QueryWithArgs)) error {
+			return acceptIncoming(ctx, yield)
+		}, coro.KillOnContextDone(coroCtx))
+		g(func() error {
+			defer cancel()
+			for queries.Next() {
+				baseQuery := queries.Yielded
+				err := drv.fetchDeliveries(ctx, yield, drv.Ordered.FetchIncomingRows, baseQuery.Query, baseQuery.Args...)
 				if err != nil {
 					return err
 				}
 			}
 			return nil
 		})
+		return wait()
 	}, nil
 }
 
-func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx stopcontext.Context, deliveries chan<- Delivery) error {
+func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, yield func(Delivery)) error {
 	q := drv.PendingBaseQuery
-	return drv.fetchDeliveries(ctx, deliveries, drv.Ordered.FetchPendingRows, q.Query, q.Args...)
+	return drv.fetchDeliveries(ctx, yield, drv.Ordered.FetchPendingRows, q.Query, q.Args...)
 }
 
 type fetchFunc = func(
 	ctx context.Context,
 	tx sqlx.Tx,
-	into chan<- ScanFunc,
+	yield func(sqlx.Row),
 	baseQuery string,
 	args ...interface{},
 ) error
 
 func (drv PQSubscriptionDriver) fetchDeliveries(
-	ctx stopcontext.Context,
-	deliveries chan<- Delivery,
+	ctx context.Context,
+	yield func(Delivery),
 	fetch fetchFunc,
 	query string,
 	args ...interface{},
@@ -364,68 +300,47 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 		return fmt.Errorf("beginning transaction: %w", err)
 	}
 
-	rows := make(chan ScanFunc)
-	ctx, stop := stopcontext.WithStop(ctx)
-
-	err = gock.Wait(func() error {
-		defer close(rows)
-		return fetch(ctx, tx, rows, query, args...)
-	}, func() error {
-		defer stop()
-		return drv.rowsToDeliveries(ctx, tx, deliveries, rows)
-	})
-	if err != nil && !errors.Is(err, context.Canceled) {
-		tx.Rollback()
-		return err
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		return fmt.Errorf("committing transaction: %w", err)
-	}
-
-	return nil
-}
-
-func (drv PQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, deliveries chan<- Delivery, rows <-chan ScanFunc) error {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	deliveriesFromRows := make(chan Delivery)
-	return gock.Wait(func() error {
-		defer close(deliveriesFromRows)
-		return drv.RowsToDeliveries(ctx, tx, deliveriesFromRows, rows)
-	}, func() error {
-		defer cancel()
-		for d := range deliveriesFromRows {
-			acked := make(chan struct{}, 1)
-
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case deliveries <- drv.deliverySendingAckedSignal(tx, d, acked):
+	coroCtx, cancel := context.WithCancel(ctx)
+	g, wait := gock.Bundle()
+	rows := NewRowIterator(g, func(yield func(sqlx.Row)) error {
+		defer func() {
+			if r := recover(); r != nil {
+				panic(r)
 			}
+		}()
+		return fetch(ctx, tx, yield, query, args...)
+	}, coro.KillOnContextDone(coroCtx))
+	g(func() error {
+		defer cancel()
+		return drv.rowsToDeliveries(ctx, tx, yield, rows)
+	})
 
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-acked:
+	defer func() {
+		r := recover()
+		if r != nil {
+			if err, ok := r.(error); !ok || !errors.As(err, &coro.ErrKilled{}) {
+				panic(r)
 			}
 		}
-		return nil
-	})
+
+		if err != nil && !errors.Is(err, context.Canceled) {
+			tx.Rollback()
+			return
+		}
+
+		err = tx.Commit()
+		if err != nil {
+			err = fmt.Errorf("committing transaction: %w", err)
+		}
+	}()
+
+	err = wait()
+
+	return wait()
 }
 
-func (drv PQSubscriptionDriver) deliverySendingAckedSignal(tx sqlx.Tx, d Delivery, acked chan<- struct{}) Delivery {
-	return Delivery{
-		Unwrap: d.Unwrap,
-		OK: func(ctx context.Context) error {
-			defer close(acked)
-			return d.OK(ctx)
-		},
-		Requeue: func(ctx context.Context) error {
-			defer close(acked)
-			return d.Requeue(ctx)
-		},
-	}
+func (drv PQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, yield func(Delivery), rows *RowIterator) error {
+	return drv.RowsToDeliveries(ctx, tx, func(d Delivery) {
+		yield(d) //DeliveryWithAckedHook(d, acked))
+	}, rows)
 }
