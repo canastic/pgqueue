@@ -118,8 +118,6 @@ func TestPQBasicOrdered(t *testing.T) {
 }
 
 func TestPQBasicUnordered(t *testing.T) {
-	t.Skip("TODO: flaky")
-
 	if !enabled {
 		t.Skip("Set PGQUEUE_TEST_ENABLED=true to run")
 		return
@@ -131,35 +129,37 @@ func TestPQBasicUnordered(t *testing.T) {
 	db, cleanupDB := createTestDB(ctx, t)
 	defer cleanupDB()
 
+	// Set up a bunch of consumers. Each consumer function is actually a bunch
+	// of concurrent consumers for the same subscription.
+	//
+	// There will be 3 queued messages: "pending message n"
+
 	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Unordered)
 	defer cleanupConsumers()
 
-	publishedNewMessages := false
+	// First test: ack the first message, then publish some incoming messages.
+
+	assertsByConsumer := map[*testConsumer]receiveAssertions{}
 	for _, c := range consumers {
 		expected := []string{
 			"pending message 0",
 			"pending message 1",
 			"pending message 2",
 		}
-		if publishedNewMessages {
-			expected = append(expected,
-				"incoming message 0",
-				"incoming message 1",
-				"incoming message 2",
-				"new incoming message",
-				"incoming message after restart",
-			)
-		}
-		assertReceive, assertAllReceived := unorderedExpecter(c, expected)
+		asserts := unorderedExpecter(c, expected)
+		asserts.receive(t)
+		assertsByConsumer[c] = asserts
+	}
 
-		assertReceive(t)
+	for i := 0; i < 3; i++ {
+		err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
+		assert.NoError(t, err)
+	}
 
-		if !publishedNewMessages {
-			for i := 0; i < 3; i++ {
-				err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
-				assert.NoError(t, err, "subscription %q", c.subscription)
-			}
-		}
+	// Now let's receive and ack all queued messages, in random order.
+
+	for _, c := range consumers {
+		asserts := assertsByConsumer[c]
 
 		for range []string{
 			"pending message 1",
@@ -168,36 +168,40 @@ func TestPQBasicUnordered(t *testing.T) {
 			"incoming message 1",
 			"incoming message 2",
 		} {
-			assertReceive(t)
+			asserts.receive(t)
 		}
 
-		if !publishedNewMessages {
-			chantest.AssertNoRecv(t, c.deliveries, "subscription %q", c.subscription)
-			err := publishMessage(ctx, db, "new incoming message")
-			assert.NoError(t, err, "subscription %q", c.subscription)
-		}
-		assertReceive(t)
+		// Now the queue should be empty.
+		chantest.AssertNoRecv(t, c.deliveries, "subscription %q", c.subscription)
+	}
 
-		if publishedNewMessages {
-			// Let's consume next expected message but not ACK it, to test it
-			// that we get it delivered again when we restart the consumers.
-			chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription)
-		}
-		c.stop()
+	// Let's publish a new message once the queue is empty, and process it.
+
+	err := publishMessage(ctx, db, "new incoming message")
+	assert.NoError(t, err)
+
+	for _, c := range consumers {
+		asserts := assertsByConsumer[c]
+		asserts.receive(t)
+	}
+
+	// Let's publish and deliver a message but not consume it, to test that we get
+	// it delivered when we restart the consumers.
+
+	err = publishMessage(ctx, db, "incoming message after restart")
+	assert.NoError(t, err)
+
+	for _, c := range consumers {
+		asserts := assertsByConsumer[c]
+
+		c.kill()
 		startTestConsumer(t, ctx, c)
 
-		if !publishedNewMessages {
-			chantest.AssertNoRecv(t, c.deliveries)
-			err := publishMessage(ctx, db, "incoming message after restart")
-			assert.NoError(t, err, "subscription %q", c.subscription)
-		}
-		assertReceive(t)
+		asserts.receive(t)
 
 		c.stop()
 
-		publishedNewMessages = true
-
-		assertAllReceived(t)
+		asserts.allReceived(t)
 	}
 }
 
@@ -303,7 +307,12 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 	}()
 }
 
-func unorderedExpecter(c *testConsumer, expectedPayloads []string) (assertReceive, assertAllReceived func(*testing.T)) {
+type receiveAssertions struct {
+	receive     func(*testing.T)
+	allReceived func(*testing.T)
+}
+
+func unorderedExpecter(c *testConsumer, expectedPayloads []string) receiveAssertions {
 	expectedSet := map[string]struct{}{}
 	for _, expected := range expectedPayloads {
 		expectedSet[expected] = struct{}{}
@@ -311,7 +320,7 @@ func unorderedExpecter(c *testConsumer, expectedPayloads []string) (assertReceiv
 
 	deliveryCount := 0
 
-	assertReceive = func(t *testing.T) {
+	assertReceive := func(t *testing.T) {
 		t.Helper()
 		d := chantest.AssertRecv(t, c.deliveries, "subscription %q delivery %d: timeout waiting for delivery receive", c.subscription, deliveryCount).(testStringDelivered)
 		delete(expectedSet, d.payload)
@@ -319,12 +328,12 @@ func unorderedExpecter(c *testConsumer, expectedPayloads []string) (assertReceiv
 		deliveryCount++
 	}
 
-	assertAllReceived = func(t *testing.T) {
+	assertAllReceived := func(t *testing.T) {
 		t.Helper()
 		assert.Len(t, expectedSet, 0)
 	}
 
-	return assertReceive, assertAllReceived
+	return receiveAssertions{receive: assertReceive, allReceived: assertAllReceived}
 }
 
 type testStringDelivered struct {
