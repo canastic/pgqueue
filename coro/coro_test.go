@@ -60,6 +60,7 @@ func ExampleNewIterator() {
 
 func TestLeak(t *testing.T) {
 	panicked := make(chan interface{})
+
 	func() {
 		resume := coro.New(func(yield func()) {
 			defer func() {
@@ -71,9 +72,16 @@ func TestLeak(t *testing.T) {
 		})
 		resume()
 	}()
-	runtime.GC()
-	p := <-panicked
-	if err, ok := p.(error); !ok || !errors.As(err, &coro.ErrKilled{}) || !errors.Is(err, coro.ErrLeak) {
-		t.Errorf("expected ErrLeak within an ErrKilled, got %v", p)
+
+	for {
+		runtime.GC()
+		select {
+		case p := <-panicked:
+			if err, ok := p.(error); !ok || !errors.As(err, &coro.ErrKilled{}) || !errors.Is(err, coro.ErrLeak) {
+				t.Errorf("expected ErrLeak within an ErrKilled, got %v", p)
+			}
+			return
+		default:
+		}
 	}
 }

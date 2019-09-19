@@ -46,7 +46,10 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 	yieldCh := make(chan struct{})
 	garbageCollected := make(chan struct{})
 
+	var resumeToken bool
 	resume := func() bool {
+		resumeToken = !resumeToken
+
 		// resume...
 		_, ok := <-yieldCh
 		if !ok {
@@ -54,12 +57,12 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 			return false
 		}
 
-		// ... and wait for suspend or return
+		// ... and wait for yield or return
 		_, ok = <-yieldCh
 		return ok
 	}
 
-	runtime.SetFinalizer(&resume, func(resume interface{}) {
+	runtime.SetFinalizer(&resumeToken, func(interface{}) {
 		close(garbageCollected)
 	})
 
