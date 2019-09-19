@@ -35,11 +35,12 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 		g, wait := gock.Bundle()
 		defer wait()
 
-		g = panicAsError(g)
+		g = goPanicAsError(g)
 
 		coroCtx, cancel := context.WithCancel(ctx)
 
-		deliveries := NewDeliveryIterator(g, func(yield func(Delivery)) error {
+		var deliveries *DeliveryIterator
+		deliveries = NewDeliveryIterator(g, func(yield func(Delivery)) error {
 			err := driver.FetchPendingDeliveries(ctx, yield)
 			if err != nil {
 				return fmt.Errorf("fetching pending deliveries: %w", err)
@@ -70,7 +71,25 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 					return nil
 				}
 
-				err := handleDelivery(ctx, deliveries.Yielded, getHandler)
+				// If the context is cancelled while the handler is running,
+				// we just ignore the handler and kill everything on our side.
+				// This is a more fail-fast approach, and there's stopcontext
+				// if consumers want a softer stop.
+
+				handleErr := make(chan error, 1)
+				go func() {
+					handleErr <- func() (err error) {
+						defer panicAsError(&err)
+						return handleDelivery(ctx, deliveries.Yielded, getHandler)
+					}()
+				}()
+
+				var err error
+				select {
+				case <-ctx.Done():
+					err = ctx.Err()
+				case err = <-handleErr:
+				}
 				if err != nil {
 					return fmt.Errorf("handling delivery: %w", err)
 				}
@@ -207,15 +226,17 @@ func (p Panic) Unwrap() error {
 	}
 }
 
-func panicAsError(g func(func() error)) func(func() error) {
+func goPanicAsError(g func(func() error)) func(func() error) {
 	return func(f func() error) {
 		g(func() (err error) {
-			defer func() {
-				if r := recover(); r != nil {
-					err = Panic{r, debug.Stack()}
-				}
-			}()
+			defer panicAsError(&err)
 			return f()
 		})
+	}
+}
+
+func panicAsError(err *error) {
+	if r := recover(); r != nil {
+		*err = Panic{r, debug.Stack()}
 	}
 }
