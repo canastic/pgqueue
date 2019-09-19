@@ -38,23 +38,37 @@ func TestPQBasicOrdered(t *testing.T) {
 	db, cleanupDB := createTestDB(ctx, t)
 	defer cleanupDB()
 
+	// Set up a bunch of consumers. Each consumer function is actually a bunch
+	// of concurrent consumers for the same subscription.
+	//
+	// There will be 3 queued messages: "pending message n"
+
 	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Ordered)
 	defer cleanupConsumers()
 
-	publishedNewMessages := false
-	for consumerName, c := range consumers {
+	// First test: deliver the first message, then publish some incoming
+	// messages, then ack the delivery. Pending messages should arrive before
+	// incoming messages do.
+
+	pendingAcks := map[*testConsumer]chan<- Ack{}
+	for _, c := range consumers {
 		d := chantest.AssertRecv(t, c.deliveries).(testStringDelivered)
-		assert.Equal(t, "pending message 0", d.payload, "consumer %q", consumerName)
+		assert.Equal(t, "pending message 0", d.payload, "subscription %q", c.subscription)
+		pendingAcks[c] = d.ack
+	}
 
-		if !publishedNewMessages {
-			for i := 0; i < 3; i++ {
-				err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
-				assert.NoError(t, err, "consumer %q", consumerName)
-			}
-		}
+	for i := 0; i < 3; i++ {
+		err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
+		assert.NoError(t, err)
+	}
 
-		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
+	for c, ack := range pendingAcks {
+		chantest.AssertSend(t, ack, OK, "subscription %q", c.subscription)
+	}
 
+	// Now let's receive and ack all queued messages, in order.
+
+	for _, c := range consumers {
 		for _, expected := range []string{
 			"pending message 1",
 			"pending message 2",
@@ -62,43 +76,44 @@ func TestPQBasicOrdered(t *testing.T) {
 			"incoming message 1",
 			"incoming message 2",
 		} {
-			d := chantest.AssertRecv(t, c.deliveries, "consumer %q msg %q", consumerName, expected).(testStringDelivered)
-			assert.Equal(t, expected, d.payload, "consumer %q msg %q", consumerName, expected)
-			chantest.AssertSend(t, d.ack, OK, "consumer %q msg %q", consumerName, expected)
+			d := chantest.AssertRecv(t, c.deliveries, "subscription %q msg %q", c.subscription, expected).(testStringDelivered)
+			assert.Equal(t, expected, d.payload, "subscription %q msg %q", c.subscription, expected)
+			chantest.AssertSend(t, d.ack, OK, "subscription %q msg %q", c.subscription, expected)
 		}
 
-		if !publishedNewMessages {
-			chantest.AssertNoRecv(t, c.deliveries, "consumer %q", consumerName)
-			err := publishMessage(ctx, db, "new incoming message")
-			assert.NoError(t, err, "consumer %q", consumerName)
-		}
+		// Now the queue should be empty.
+		chantest.AssertNoRecv(t, c.deliveries, "subscription %q", c.subscription)
+	}
 
-		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
-		assert.Equal(t, "new incoming message", d.payload, "consumer %q", consumerName)
-		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
+	// Let's publish a new message once the queue is empty, and process it.
 
-		if publishedNewMessages {
-			// Let's consume next expected message but not ACK it, to test it
-			// that we get it delivered again when we restart the consumers.
-			d := chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
-			assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
-		}
-		c.stop()
+	err := publishMessage(ctx, db, "new incoming message")
+	assert.NoError(t, err)
+
+	for _, c := range consumers {
+		d := chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription).(testStringDelivered)
+		assert.Equal(t, "new incoming message", d.payload, "subscription %q", c.subscription)
+		chantest.AssertSend(t, d.ack, OK, "subscription %q", c.subscription)
+	}
+
+	// Let's publish and deliver a message but not ACK it, to test that we get it
+	// delivered again when we restart the consumers.
+
+	err = publishMessage(ctx, db, "incoming message after restart")
+	assert.NoError(t, err)
+
+	for _, c := range consumers {
+		d := chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription).(testStringDelivered)
+		assert.Equal(t, "incoming message after restart", d.payload, "subscription %q", c.subscription)
+
+		c.kill()
 		startTestConsumer(t, ctx, c)
 
-		if !publishedNewMessages {
-			chantest.AssertNoRecv(t, c.deliveries)
-			err := publishMessage(ctx, db, "incoming message after restart")
-			assert.NoError(t, err, "consumer %q", consumerName)
-		}
-
-		d = chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName).(testStringDelivered)
-		assert.Equal(t, "incoming message after restart", d.payload, "consumer %q", consumerName)
-		chantest.AssertSend(t, d.ack, OK, "consumer %q", consumerName)
+		d = chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription).(testStringDelivered)
+		assert.Equal(t, "incoming message after restart", d.payload, "subscription %q", c.subscription)
+		chantest.AssertSend(t, d.ack, OK, "subscription %q", c.subscription)
 
 		c.stop()
-
-		publishedNewMessages = true
 	}
 }
 
@@ -120,7 +135,7 @@ func TestPQBasicUnordered(t *testing.T) {
 	defer cleanupConsumers()
 
 	publishedNewMessages := false
-	for consumerName, c := range consumers {
+	for _, c := range consumers {
 		expected := []string{
 			"pending message 0",
 			"pending message 1",
@@ -142,7 +157,7 @@ func TestPQBasicUnordered(t *testing.T) {
 		if !publishedNewMessages {
 			for i := 0; i < 3; i++ {
 				err := publishMessage(ctx, db, fmt.Sprintf("incoming message %d", i))
-				assert.NoError(t, err, "consumer %q", consumerName)
+				assert.NoError(t, err, "subscription %q", c.subscription)
 			}
 		}
 
@@ -157,16 +172,16 @@ func TestPQBasicUnordered(t *testing.T) {
 		}
 
 		if !publishedNewMessages {
-			chantest.AssertNoRecv(t, c.deliveries, "consumer %q", consumerName)
+			chantest.AssertNoRecv(t, c.deliveries, "subscription %q", c.subscription)
 			err := publishMessage(ctx, db, "new incoming message")
-			assert.NoError(t, err, "consumer %q", consumerName)
+			assert.NoError(t, err, "subscription %q", c.subscription)
 		}
 		assertReceive(t)
 
 		if publishedNewMessages {
 			// Let's consume next expected message but not ACK it, to test it
 			// that we get it delivered again when we restart the consumers.
-			chantest.AssertRecv(t, c.deliveries, "consumer %q", consumerName)
+			chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription)
 		}
 		c.stop()
 		startTestConsumer(t, ctx, c)
@@ -174,7 +189,7 @@ func TestPQBasicUnordered(t *testing.T) {
 		if !publishedNewMessages {
 			chantest.AssertNoRecv(t, c.deliveries)
 			err := publishMessage(ctx, db, "incoming message after restart")
-			assert.NoError(t, err, "consumer %q", consumerName)
+			assert.NoError(t, err, "subscription %q", c.subscription)
 		}
 		assertReceive(t)
 
@@ -193,11 +208,11 @@ func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order 
 	consumers = map[string]*testConsumer{}
 	cleanup = func() {}
 
-	for _, name := range []string{"foo", "bar"} {
+	for _, subscription := range []string{"foo", "bar"} {
 		var subConsume []ConsumeFunc
 
 		c := &testConsumer{
-			name: name,
+			subscription: subscription,
 			consume: func(ctx context.Context, gh GetHandler) error {
 				g, wait := gock.Bundle()
 				for _, consume := range subConsume {
@@ -210,14 +225,14 @@ func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order 
 			},
 			deliveries: make(chan testStringDelivered, concurrentConsumersPerSubscription),
 		}
-		consumers[name] = c
+		consumers[subscription] = c
 
 		for i := 0; i < concurrentConsumersPerSubscription; i++ {
 			l := NewListener(db.connStr, time.Millisecond, time.Millisecond, nil)
 			prevCleanup := cleanup
 			cleanup = func() { l.Close(); prevCleanup() }
 
-			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, name, order))
+			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, subscription, order))
 			assert.NoError(t, err)
 
 			subConsume = append(subConsume, consume)
@@ -246,11 +261,28 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 		t.Helper()
 
 		stop()
+
 		select {
 		case <-done:
 		case <-time.After(1 * time.Second):
-			t.Errorf("had to cancel consumer %q", c.name)
+			t.Errorf("had to cancel subscription %q", c.subscription)
 			cancel()
+		}
+
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Errorf("subscription %q consumer not killed by context cancel", c.subscription)
+		}
+	}
+	c.kill = func() {
+		t.Helper()
+		cancel()
+
+		select {
+		case <-done:
+		case <-time.After(1 * time.Second):
+			t.Errorf("subscription %q consumer not killed by context cancel", c.subscription)
 		}
 	}
 
@@ -264,6 +296,9 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 				return ctx, <-ack
 			}
 		})
+		if errors.Is(err, context.Canceled) {
+			err = nil
+		}
 		assert.NoError(t, err)
 	}()
 }
@@ -278,9 +313,9 @@ func unorderedExpecter(c *testConsumer, expectedPayloads []string) (assertReceiv
 
 	assertReceive = func(t *testing.T) {
 		t.Helper()
-		d := chantest.AssertRecv(t, c.deliveries, "consumer %q delivery %d: timeout waiting for delivery receive", c.name, deliveryCount).(testStringDelivered)
+		d := chantest.AssertRecv(t, c.deliveries, "subscription %q delivery %d: timeout waiting for delivery receive", c.subscription, deliveryCount).(testStringDelivered)
 		delete(expectedSet, d.payload)
-		chantest.AssertSend(t, d.ack, OK, "consumer %q delivery %d: timeout waiting for ack send", c.name, deliveryCount)
+		chantest.AssertSend(t, d.ack, OK, "subscription %q delivery %d: timeout waiting for ack send", c.subscription, deliveryCount)
 		deliveryCount++
 	}
 
@@ -298,10 +333,11 @@ type testStringDelivered struct {
 }
 
 type testConsumer struct {
-	name       string
-	consume    ConsumeFunc
-	deliveries chan testStringDelivered
-	stop       func()
+	subscription string
+	consume      ConsumeFunc
+	deliveries   chan testStringDelivered
+	stop         func()
+	kill         func()
 }
 
 // TODO: Exhaustive failure and concurrency tests.
@@ -368,6 +404,12 @@ func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Con
 }
 
 func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sqlx.Tx, yield func(Delivery), rows *RowIterator) error {
+	defer func() {
+		r := recover()
+		if r != nil {
+			panic(r)
+		}
+	}()
 	for rows.Next() {
 		var serial int64
 		var payload string
@@ -411,7 +453,6 @@ func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sql
 				return err
 			},
 		})
-
 	}
 	return nil
 }
