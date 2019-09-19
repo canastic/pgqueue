@@ -312,7 +312,7 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 	}, coro.KillOnContextDone(coroCtx))
 	g(func() error {
 		defer cancel()
-		return drv.rowsToDeliveries(ctx, tx, yield, rows)
+		return drv.RowsToDeliveries(ctx, tx, yield, rows)
 	})
 
 	defer func() {
@@ -350,10 +350,4 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 	}()
 
 	return wait()
-}
-
-func (drv PQSubscriptionDriver) rowsToDeliveries(ctx context.Context, tx sqlx.Tx, yield func(Delivery), rows *RowIterator) error {
-	return drv.RowsToDeliveries(ctx, tx, func(d Delivery) {
-		yield(d) //DeliveryWithAckedHook(d, acked))
-	}, rows)
 }
