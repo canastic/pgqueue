@@ -66,14 +66,18 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 		close(garbageCollected)
 	})
 
+	var yieldPanic error
+
 	waitResume := func() {
 		select {
 		case yieldCh <- struct{}{}:
+			return
 		case <-garbageCollected:
-			panic(ErrKilled{ErrLeak})
+			yieldPanic = ErrKilled{ErrLeak}
 		case <-options.killCtx.Done():
-			panic(ErrKilled{options.killCtx.Err()})
+			yieldPanic = ErrKilled{options.killCtx.Err()}
 		}
+		panic(yieldPanic)
 	}
 
 	options.g(func() {
@@ -93,6 +97,10 @@ func New(f func(yield func()), setOptions ...SetOption) Resume {
 		waitResume()
 
 		f(func() {
+			if yieldPanic != nil {
+				panic(yieldPanic)
+			}
+
 			// make call to Resume return
 			yieldCh <- struct{}{}
 
