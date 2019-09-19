@@ -294,7 +294,7 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 	fetch fetchFunc,
 	query string,
 	args ...interface{},
-) error {
+) (err error) {
 	tx, err := drv.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -317,13 +317,23 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 
 	defer func() {
 		r := recover()
+
+		// If this iterator has died, finish the transaction anyway.
+		var errKilled error
 		if r != nil {
-			if err, ok := r.(error); !ok || !errors.As(err, &coro.ErrKilled{}) {
+			if err, ok := r.(error); ok && errors.As(err, &coro.ErrKilled{}) {
+				errKilled = err
+			} else {
 				panic(r)
 			}
 		}
 
-		if err != nil && !errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil {
+			// The transaction should've killed by the context cancel already.
+			return
+		}
+
+		if err != nil {
 			tx.Rollback()
 			return
 		}
@@ -331,10 +341,13 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 		err = tx.Commit()
 		if err != nil {
 			err = fmt.Errorf("committing transaction: %w", err)
+			return
+		}
+
+		if errKilled != nil {
+			panic(err)
 		}
 	}()
-
-	err = wait()
 
 	return wait()
 }
