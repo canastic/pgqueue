@@ -107,68 +107,47 @@ var (
 
 func (o OrderGuarantee) FetchIncomingRows(
 	ctx context.Context,
-	tx sqlx.Tx,
-	yield func(sqlx.Row),
-	baseQuery string,
-	args ...interface{},
+	yieldDelivery func(Delivery),
+	beginRowDelivery beginRowDeliveryFunc,
+	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
 ) error {
 	onLock := " NOWAIT"
 	if !o.ordered {
 		onLock = " SKIP LOCKED"
 	}
-
-	// We expect error 55P03, so we insert a SAVEPOINT so that we can rollback
-	// to it if that happens and avoid invalidating the transaction.
-	_, err := tx.Exec(ctx, "SAVEPOINT before_incoming_rows;")
-	if err != nil {
-		return fmt.Errorf("declaring savepoint: %w", err)
-	}
-
-	const cursorName = "incoming_rows"
-
-	_, err = tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+onLock, args...)
-	if err != nil {
-		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
-	}
-
-	err = iterCursor(ctx, yield, tx, cursorName)
+	err := queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqlx.Queryer) (sqlx.Rows, error) {
+		rows, err := query(ctx, q, func(baseQuery string) string {
+			return baseQuery + " FOR UPDATE" + onLock
+		})
+		return rows, err
+	})
 	if err != nil {
 		var pqErr *pq.Error
-		if !errors.As(err, &pqErr) || pqErr.Code != "55P03" {
-			return err
-		}
-		// The rows were already locked, which means that someone is already
-		// processing the message.
+		if errors.As(err, &pqErr) && pqErr.Code == "55P03" {
+			// The rows were already locked, which means that someone is already
+			// processing the message.
 
-		_, err = tx.Exec(ctx, "ROLLBACK TO SAVEPOINT before_incoming_rows;")
-		if err != nil {
-			return fmt.Errorf("rolling back to savepoint: %w", err)
+			err = nil
 		}
 	}
-
-	return nil
+	return err
 }
 
 func (o OrderGuarantee) FetchPendingRows(
 	ctx context.Context,
-	tx sqlx.Tx,
-	yield func(sqlx.Row),
-	baseQuery string,
-	args ...interface{},
+	yieldDelivery func(Delivery),
+	beginRowDelivery beginRowDeliveryFunc,
+	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
 ) error {
 	maybeSkipLocked := ""
 	if !o.ordered {
 		maybeSkipLocked = " SKIP LOCKED"
 	}
-
-	const cursorName = "pending_rows"
-
-	_, err := tx.Exec(ctx, "DECLARE "+cursorName+" CURSOR FOR "+baseQuery+" FOR UPDATE"+maybeSkipLocked, args...)
-	if err != nil {
-		return fmt.Errorf("declaring cursor %q: %w", cursorName, err)
-	}
-
-	return iterCursor(ctx, yield, tx, cursorName)
+	return queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqlx.Queryer) (sqlx.Rows, error) {
+		return query(ctx, q, func(baseQuery string) string {
+			return baseQuery + " FOR UPDATE" + maybeSkipLocked
+		})
+	})
 }
 
 const MarkAsDeliveredSQL string = `
@@ -180,9 +159,12 @@ const UpdateLastAckSQL string = `
 	last_ack_at = NOW() AT TIME ZONE 'UTC'
 `
 
-func iterCursor(ctx context.Context, yield func(sqlx.Row), tx sqlx.Tx, cursor string) (err error) {
-	defer tx.Exec(ctx, "CLOSE "+cursor)
-
+func queryDeliveries(
+	ctx context.Context,
+	yieldDelivery func(Delivery),
+	beginRowDelivery beginRowDeliveryFunc,
+	query func(context.Context, sqlx.Queryer) (sqlx.Rows, error),
+) (err error) {
 	scanErr := make(chan error, 1)
 
 	for {
@@ -191,15 +173,47 @@ func iterCursor(ctx context.Context, yield func(sqlx.Row), tx sqlx.Tx, cursor st
 		default:
 		}
 
-		rows, err := tx.Query(ctx, "FETCH NEXT FROM "+cursor)
+		tx, yield, err := beginRowDelivery(ctx)
 		if err != nil {
-			return fmt.Errorf("fetching next from cursor: %w", err)
+			return fmt.Errorf("beginning transaction to handle delivery: %w", err)
+		}
+
+		rows, err := query(ctx, tx)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Errorf("fetching next delivery from cursor: %w", err)
 		}
 		if !rows.Next() {
+			tx.Rollback()
 			return nil
 		}
 
-		yield(rowsCloseAfterScan{rows, scanErr})
+		finishTx := func(do func(context.Context) error) func(context.Context) error {
+			return func(ctx context.Context) error {
+				err := do(ctx)
+				if err != nil {
+					tx.Rollback()
+					return err
+				}
+				err = tx.Commit()
+				if err != nil {
+					return fmt.Errorf("committing delivery transaction: %w", err)
+				}
+				return nil
+			}
+		}
+
+		yield(DeliveryRow{
+			Tx:  tx,
+			Row: rowsCloseAfterScan{rows, scanErr},
+			Deliver: func(d Delivery) {
+				yieldDelivery(Delivery{
+					Unwrap:  d.Unwrap,
+					OK:      finishTx(d.OK),
+					Requeue: finishTx(d.Requeue),
+				})
+			},
+		})
 		if err := <-scanErr; err != nil {
 			return fmt.Errorf("scanning: %w", err)
 		}
@@ -231,7 +245,7 @@ type PQSubscriptionDriver struct {
 	ExecInsertSubscription       func(context.Context) error
 	ListenForIncomingBaseQueries func(context.Context) (AcceptQueriesFunc, error)
 	PendingBaseQuery             QueryWithArgs
-	RowsToDeliveries             func(context.Context, sqlx.Tx, func(Delivery), *RowIterator) error
+	RowsToDeliveries             func(context.Context, *DeliveryRowIterator) error
 	Ordered                      OrderGuarantee
 }
 
@@ -280,74 +294,57 @@ func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, yiel
 	return drv.fetchDeliveries(ctx, yield, drv.Ordered.FetchPendingRows, q.Query, q.Args...)
 }
 
+// DeliveryRow is a row for a delivery with a transaction to ACK it.
+type DeliveryRow struct {
+	sqlx.Row
+	sqlx.Tx
+	Deliver func(Delivery)
+}
+
+type beginRowDeliveryFunc = func(context.Context) (sqlx.Tx, func(DeliveryRow), error)
+
 type fetchFunc = func(
 	ctx context.Context,
-	tx sqlx.Tx,
-	yield func(sqlx.Row),
-	baseQuery string,
-	args ...interface{},
+	yieldDelivery func(Delivery),
+	beginRowDelivery beginRowDeliveryFunc,
+	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
 ) error
+
+func (drv PQSubscriptionDriver) beginRowDelivery(yield func(DeliveryRow)) beginRowDeliveryFunc {
+	return func(ctx context.Context) (sqlx.Tx, func(DeliveryRow), error) {
+		tx, err := drv.DB.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("beginning transaction to handle delivery: %w", err)
+		}
+		return tx, yield, nil
+	}
+}
 
 func (drv PQSubscriptionDriver) fetchDeliveries(
 	ctx context.Context,
-	yield func(Delivery),
+	yieldDelivery func(Delivery),
 	fetch fetchFunc,
-	query string,
+	baseQuery string,
 	args ...interface{},
 ) (err error) {
-	tx, err := drv.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("beginning transaction: %w", err)
-	}
-
 	coroCtx, cancel := context.WithCancel(ctx)
 	g, wait := gock.Bundle()
-	rows := NewRowIterator(g, func(yield func(sqlx.Row)) error {
+	rows := NewDeliveryRowIterator(g, func(yield func(DeliveryRow)) error {
 		defer func() {
 			if r := recover(); r != nil {
 				panic(r)
 			}
 		}()
-		return fetch(ctx, tx, yield, query, args...)
+		return fetch(ctx, yieldDelivery, drv.beginRowDelivery(func(r DeliveryRow) {
+			yield(r)
+		}), func(ctx context.Context, q sqlx.Queryer, query func(baseQuery string) string) (sqlx.Rows, error) {
+			return q.Query(ctx, query(baseQuery)+" LIMIT 1", args...)
+		})
 	}, coro.KillOnContextDone(coroCtx))
 	g(func() error {
 		defer cancel()
-		return drv.RowsToDeliveries(ctx, tx, yield, rows)
+		return drv.RowsToDeliveries(ctx, rows)
 	})
-
-	defer func() {
-		r := recover()
-
-		// If this iterator has died, finish the transaction anyway.
-		var errKilled error
-		if r != nil {
-			if err, ok := r.(error); ok && errors.As(err, &coro.ErrKilled{}) {
-				errKilled = err
-			} else {
-				panic(r)
-			}
-		}
-
-		if ctx.Err() != nil {
-			// The transaction should've killed by the context cancel already.
-			return
-		}
-
-		if err != nil {
-			tx.Rollback()
-			return
-		}
-
-		err = tx.Commit()
-		if err != nil {
-			err = fmt.Errorf("committing transaction: %w", err)
-			return
-		}
-
-		if errKilled != nil {
-			panic(err)
-		}
-	}()
 
 	return wait()
 }

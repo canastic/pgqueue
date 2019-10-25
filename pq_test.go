@@ -32,6 +32,9 @@ func TestPQBasicOrdered(t *testing.T) {
 		return
 	}
 
+	g, wait := gock.Bundle()
+	defer wait()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -43,7 +46,7 @@ func TestPQBasicOrdered(t *testing.T) {
 	//
 	// There will be 3 queued messages: "pending message n"
 
-	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Ordered)
+	consumers, cleanupConsumers := setupConsumersTest(t, ctx, g, db, Ordered)
 	defer cleanupConsumers()
 
 	// First test: deliver the first message, then publish some incoming
@@ -52,7 +55,7 @@ func TestPQBasicOrdered(t *testing.T) {
 
 	pendingAcks := map[*testConsumer]chan<- Ack{}
 	for _, c := range consumers {
-		d := chantest.AssertRecv(t, c.deliveries).(testStringDelivered)
+		d := chantest.Before(1*time.Second).AssertRecv(t, c.deliveries).(testStringDelivered)
 		assert.Equal(t, "pending message 0", d.payload, "subscription %q", c.subscription)
 		pendingAcks[c] = d.ack
 	}
@@ -107,7 +110,7 @@ func TestPQBasicOrdered(t *testing.T) {
 		assert.Equal(t, "incoming message after restart", d.payload, "subscription %q", c.subscription)
 
 		c.kill()
-		startTestConsumer(t, ctx, c)
+		startTestConsumer(t, ctx, g, c)
 
 		d = chantest.AssertRecv(t, c.deliveries, "subscription %q", c.subscription).(testStringDelivered)
 		assert.Equal(t, "incoming message after restart", d.payload, "subscription %q", c.subscription)
@@ -123,6 +126,9 @@ func TestPQBasicUnordered(t *testing.T) {
 		return
 	}
 
+	g, wait := gock.Bundle()
+	defer wait()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -134,7 +140,7 @@ func TestPQBasicUnordered(t *testing.T) {
 	//
 	// There will be 3 queued messages: "pending message n"
 
-	consumers, cleanupConsumers := setupConsumersTest(t, ctx, db, Unordered)
+	consumers, cleanupConsumers := setupConsumersTest(t, ctx, g, db, Unordered)
 	defer cleanupConsumers()
 
 	// First test: ack the first message, then publish some incoming messages.
@@ -195,7 +201,7 @@ func TestPQBasicUnordered(t *testing.T) {
 		asserts := assertsByConsumer[c]
 
 		c.kill()
-		startTestConsumer(t, ctx, c)
+		startTestConsumer(t, ctx, g, c)
 
 		asserts.receive(t)
 
@@ -205,7 +211,7 @@ func TestPQBasicUnordered(t *testing.T) {
 	}
 }
 
-func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order OrderGuarantee) (consumers map[string]*testConsumer, cleanup func()) {
+func setupConsumersTest(t *testing.T, ctx context.Context, g gock.GoFunc, db sqlxTestDB, order OrderGuarantee) (consumers map[string]*testConsumer, cleanup func()) {
 	// Concurrent consumers to test mutual exclusion.
 	const concurrentConsumersPerSubscription = 2
 
@@ -249,13 +255,13 @@ func setupConsumersTest(t *testing.T, ctx context.Context, db sqlxTestDB, order 
 	}
 
 	for _, c := range consumers {
-		startTestConsumer(t, ctx, c)
+		startTestConsumer(t, ctx, g, c)
 	}
 
 	return consumers, cleanup
 }
 
-func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
+func startTestConsumer(t *testing.T, ctx context.Context, g gock.GoFunc, c *testConsumer) {
 	t.Helper()
 
 	ctx, cancel := context.WithCancel(ctx)
@@ -290,7 +296,7 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 		}
 	}
 
-	go func() {
+	g(func() error {
 		defer close(done)
 		err := c.consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
 			var payload string
@@ -304,7 +310,8 @@ func startTestConsumer(t *testing.T, ctx context.Context, c *testConsumer) {
 			err = nil
 		}
 		assert.NoError(t, err)
-	}()
+		return nil
+	})
 }
 
 type receiveAssertions struct {
@@ -322,7 +329,7 @@ func unorderedExpecter(c *testConsumer, expectedPayloads []string) receiveAssert
 
 	assertReceive := func(t *testing.T) {
 		t.Helper()
-		d := chantest.AssertRecv(t, c.deliveries, "subscription %q delivery %d: timeout waiting for delivery receive", c.subscription, deliveryCount).(testStringDelivered)
+		d := chantest.Before(1*time.Second).AssertRecv(t, c.deliveries, "subscription %q delivery %d: timeout waiting for delivery receive", c.subscription, deliveryCount).(testStringDelivered)
 		delete(expectedSet, d.payload)
 		chantest.AssertSend(t, d.ack, OK, "subscription %q delivery %d: timeout waiting for ack send", c.subscription, deliveryCount)
 		deliveryCount++
@@ -412,7 +419,7 @@ func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Con
 	}, nil
 }
 
-func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sqlx.Tx, yield func(Delivery), rows *RowIterator) error {
+func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, rows *DeliveryRowIterator) error {
 	defer func() {
 		r := recover()
 		if r != nil {
@@ -428,7 +435,7 @@ func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sql
 			return fmt.Errorf("scanning delivery: %w", err)
 		}
 
-		_, err = tx.Exec(ctx, `
+		_, err = rows.Yielded.Exec(ctx, `
 					UPDATE message_deliveries SET `+MarkAsDeliveredSQL+`
 					WHERE
 						serial = $1
@@ -438,13 +445,13 @@ func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sql
 			return fmt.Errorf("marking as delivered: %w", err)
 		}
 
-		yield(Delivery{
+		rows.Yielded.Deliver(Delivery{
 			Unwrap: func(into interface{}) error {
 				*(into.(*string)) = payload
 				return nil
 			},
 			OK: func(ctx context.Context) error {
-				_, err := tx.Exec(ctx, `
+				_, err := rows.Yielded.Exec(ctx, `
 						DELETE FROM message_deliveries
 						WHERE
 							serial = $1
@@ -453,7 +460,7 @@ func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, tx sql
 				return err
 			},
 			Requeue: func(ctx context.Context) error {
-				_, err := tx.Exec(ctx, `
+				_, err := rows.Yielded.Exec(ctx, `
 						UPDATE message_deliveries SET `+UpdateLastAckSQL+`
 						WHERE
 							serial = $1

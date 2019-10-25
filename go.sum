@@ -12,8 +12,8 @@ github.com/stretchr/objx v0.1.0/go.mod h1:HFkY916IF+rwdDfMAkV7OtwuqBVzrE8GR6GFx+
 github.com/stretchr/testify v1.3.0 h1:TivCn/peBQ7UY8ooIcPgZFpTNSz0Q2U6UrFlUfqbe0Q=
 github.com/stretchr/testify v1.3.0/go.mod h1:M5WIy9Dh21IEIfnGCwXGc5bZfKNJtfHm1UVUgZn+9EI=
 github.com/tcard/gock v0.1.1/go.mod h1:dc7/gtKnSdkyWtIgbV2RCL9/XksFpZzbVzZfSxeHH34=
-github.com/tcard/gock v0.1.4 h1:CUOVD6THVRRkfAwal935Ex5QpmPONorPNldRlIkzdUk=
-github.com/tcard/gock v0.1.4/go.mod h1:dc7/gtKnSdkyWtIgbV2RCL9/XksFpZzbVzZfSxeHH34=
+github.com/tcard/gock v0.1.6 h1:zCc+oTjLyFYeX8P1cPI4RrbmO1+zywvXRAHuWOfcjik=
+github.com/tcard/gock v0.1.6/go.mod h1:dc7/gtKnSdkyWtIgbV2RCL9/XksFpZzbVzZfSxeHH34=
 gitlab.com/canastic/chantest v0.0.0-20190916162146-fecb097c26e0 h1:JLy6oe7LgTLvGMhsgZmEqvWPK6H2PRxhN93rID2tNHU=
 gitlab.com/canastic/chantest v0.0.0-20190916162146-fecb097c26e0/go.mod h1:jCARv5p1UgAP4J+z7vF/kdO47tctzARlwkdjBgtWNyw=
 gitlab.com/canastic/hencelog v0.0.0-20190724154332-53edc755f516 h1:bmJJZiOiet7qujPqJSiogMozLWHua11X5TWOmdIa00U=
@@ -24,3 +24,5 @@ gitlab.com/canastic/ulidx v0.1.1/go.mod h1:SO2Q3NifF7sr1jh+apM//tDosEHSpkF7VED2i
 golang.org/x/xerrors v0.0.0-20190513163551-3ee3066db522/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7 h1:9zdDQZ7Thm29KFXgAX/+yaf3eVbP7djjWp/dXAppNCc=
 golang.org/x/xerrors v0.0.0-20190717185122-a985d3407aa7/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
+golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898 h1:/atklqdjdhuosWIl6AIbOeHJjicWYPqR9bpxqxYG2pA=
+golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=

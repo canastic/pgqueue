@@ -3,7 +3,6 @@ package pgqueue
 import (
 	"github.com/lib/pq"
 	"gitlab.com/canastic/pgqueue/coro"
-	"gitlab.com/canastic/sqlx"
 )
 
 func goError(g func(func() error), returned *error) coro.GoFunc {
@@ -37,11 +36,11 @@ type DeliveryIterator struct {
 	Returned error
 }
 
-func NewRowIterator(g func(func() error), f func(yield func(sqlx.Row)) error, options ...coro.SetOption) *RowIterator {
-	var it RowIterator
+func NewDeliveryRowIterator(g func(func() error), f func(yield func(DeliveryRow)) error, options ...coro.SetOption) *DeliveryRowIterator {
+	var it DeliveryRowIterator
 	it.Next = coro.New(
 		func(yield func()) {
-			it.Returned = f(func(v sqlx.Row) {
+			it.Returned = f(func(v DeliveryRow) {
 				it.Yielded = v
 				yield()
 			})
@@ -53,9 +52,9 @@ func NewRowIterator(g func(func() error), f func(yield func(sqlx.Row)) error, op
 	return &it
 }
 
-type RowIterator struct {
+type DeliveryRowIterator struct {
 	Next     coro.Resume
-	Yielded  sqlx.Row
+	Yielded  DeliveryRow
 	Returned error
 }
 
