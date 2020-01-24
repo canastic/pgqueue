@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"github.com/tcard/coro"
 	"github.com/tcard/gock"
-	"gitlab.com/canastic/pgqueue/coro"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 

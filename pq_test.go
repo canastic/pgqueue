@@ -12,9 +12,9 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
+	"github.com/tcard/coro"
 	"github.com/tcard/gock"
 	"gitlab.com/canastic/chantest"
-	"gitlab.com/canastic/pgqueue/coro"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
 	"gitlab.com/canastic/ulidx"

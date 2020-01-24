@@ -2,7 +2,7 @@ package pgqueue
 
 import (
 	"github.com/lib/pq"
-	"gitlab.com/canastic/pgqueue/coro"
+	"github.com/tcard/coro"
 )
 
 func goError(g func(func() error), returned *error) coro.GoFunc {

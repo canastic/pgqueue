@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/lib/pq"
+	"github.com/tcard/coro"
 	"github.com/tcard/gock"
-	"gitlab.com/canastic/pgqueue/coro"
 	"gitlab.com/canastic/pgqueue/stopcontext"
 	"gitlab.com/canastic/sqlx"
 )
