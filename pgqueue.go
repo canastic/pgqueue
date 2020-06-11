@@ -27,10 +27,13 @@ func Subscribe(ctx context.Context, driver SubscriptionDriver) (consume ConsumeF
 	}
 
 	return func(ctx context.Context, getHandler GetHandler) (err error) {
-		acceptIncoming, err := driver.ListenForDeliveries(ctx)
+		acceptIncoming, closeListener, err := driver.ListenForDeliveries(ctx)
 		if err != nil {
 			return fmt.Errorf("listening for deliveries: %w", err)
 		}
+		defer func() {
+			err = gock.AddConcurrentError(err, closeListener())
+		}()
 
 		g, wait := gock.Bundle()
 		defer wait()
@@ -153,7 +156,7 @@ type HandleFunc = func(context.Context) (context.Context, Ack)
 // A SubscriptionDriver is the abstract interface that
 type SubscriptionDriver interface {
 	InsertSubscription(context.Context) error
-	ListenForDeliveries(context.Context) (AcceptFunc, error)
+	ListenForDeliveries(context.Context) (accept AcceptFunc, close func() error, err error)
 	FetchPendingDeliveries(context.Context, func(Delivery)) error
 }
 

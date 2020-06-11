@@ -9,8 +9,9 @@ import (
 	"github.com/lib/pq"
 	"github.com/tcard/coro"
 	"github.com/tcard/gock"
+	"github.com/tcard/sqlcoro"
+	"github.com/tcard/sqler"
 	"gitlab.com/canastic/pgqueue/stopcontext"
-	"gitlab.com/canastic/sqlx"
 )
 
 type PQListener interface {
@@ -70,30 +71,31 @@ func ListenForNotifications(
 	ctx context.Context,
 	listener *Listener,
 	channel string,
-) (AcceptPQNotificationsFunc, error) {
-	err := listener.Listen(ctx, channel)
+) (accept AcceptPQNotificationsFunc, close func() error, err error) {
+	err = listener.Listen(ctx, channel)
 	if err != nil {
-		return nil, fmt.Errorf("listening to channel %q: %w", channel, err)
+		return nil, nil, fmt.Errorf("listening to channel %q: %w", channel, err)
 	}
 
 	notifs := listener.NotificationChannel()
 
 	return func(ctx context.Context, yield func(*pq.Notification)) error {
-		defer listener.Unlisten(channel)
-		for {
-			select {
-			case <-stopcontext.Stopped(ctx):
-				return ctx.Err()
-			case notif, ok := <-notifs:
-				if !ok {
-					return nil
+			for {
+				select {
+				case <-stopcontext.Stopped(ctx):
+					return ctx.Err()
+				case notif, ok := <-notifs:
+					if !ok {
+						return nil
+					}
+					yield(notif)
+				case err := <-listener.errEvent:
+					return fmt.Errorf("notifications listener connection: %w", err)
 				}
-				yield(notif)
-			case err := <-listener.errEvent:
-				return fmt.Errorf("notifications listener connection: %w", err)
 			}
-		}
-	}, nil
+		}, func() error {
+			return listener.Unlisten(channel)
+		}, nil
 }
 
 type OrderGuarantee struct {
@@ -109,13 +111,13 @@ func (o OrderGuarantee) FetchIncomingRows(
 	ctx context.Context,
 	yieldDelivery func(Delivery),
 	beginRowDelivery beginRowDeliveryFunc,
-	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
+	query func(context.Context, sqler.Queryer, func(baseQuery string) string) (sqler.Rows, error),
 ) error {
 	onLock := " NOWAIT"
 	if !o.ordered {
 		onLock = " SKIP LOCKED"
 	}
-	err := queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqlx.Queryer) (sqlx.Rows, error) {
+	err := queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqler.Queryer) (sqler.Rows, error) {
 		rows, err := query(ctx, q, func(baseQuery string) string {
 			return baseQuery + " FOR UPDATE" + onLock
 		})
@@ -137,13 +139,13 @@ func (o OrderGuarantee) FetchPendingRows(
 	ctx context.Context,
 	yieldDelivery func(Delivery),
 	beginRowDelivery beginRowDeliveryFunc,
-	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
+	query func(context.Context, sqler.Queryer, func(baseQuery string) string) (sqler.Rows, error),
 ) error {
 	maybeSkipLocked := ""
 	if !o.ordered {
 		maybeSkipLocked = " SKIP LOCKED"
 	}
-	return queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqlx.Queryer) (sqlx.Rows, error) {
+	return queryDeliveries(ctx, yieldDelivery, beginRowDelivery, func(ctx context.Context, q sqler.Queryer) (sqler.Rows, error) {
 		return query(ctx, q, func(baseQuery string) string {
 			return baseQuery + " FOR UPDATE" + maybeSkipLocked
 		})
@@ -163,9 +165,17 @@ func queryDeliveries(
 	ctx context.Context,
 	yieldDelivery func(Delivery),
 	beginRowDelivery beginRowDeliveryFunc,
-	query func(context.Context, sqlx.Queryer) (sqlx.Rows, error),
+	query func(context.Context, sqler.Queryer) (sqler.Rows, error),
 ) (err error) {
-	scanErr := make(chan error, 1)
+	var lastTx sqler.Tx
+	defer func() {
+		// If the delivery we're yielding is never read because of a finished
+		// consumer, yield will panic and we need to make sure we don't leak
+		// the delivery's transaction.
+		if lastTx != nil {
+			lastTx.Rollback()
+		}
+	}()
 
 	for {
 		select {
@@ -174,23 +184,32 @@ func queryDeliveries(
 		}
 
 		tx, yield, err := beginRowDelivery(ctx)
+		lastTx = tx
 		if err != nil {
 			return fmt.Errorf("beginning transaction to handle delivery: %w", err)
 		}
 
 		rows, err := query(ctx, tx)
 		if err != nil {
-			tx.Rollback()
 			return fmt.Errorf("fetching next delivery from cursor: %w", err)
 		}
-		if !rows.Next() {
-			tx.Rollback()
+
+		// We don't want to make a delivery if there are no more rows. So we
+		// need to peek, ensuring that the next call to rows.Next doesn't
+		// advance the cursor.
+		hasNext, rows := peekRows(rows)
+		if !hasNext {
 			return nil
 		}
 
+		finishTxErr := make(chan error, 1)
 		finishTx := func(do func(context.Context) error) func(context.Context) error {
-			return func(ctx context.Context) error {
-				err := do(ctx)
+			return func(ctx context.Context) (err error) {
+				defer func() {
+					finishTxErr <- err
+				}()
+
+				err = do(ctx)
 				if err != nil {
 					tx.Rollback()
 					return err
@@ -203,9 +222,9 @@ func queryDeliveries(
 			}
 		}
 
-		yield(DeliveryRow{
-			Tx:  tx,
-			Row: rowsCloseAfterScan{rows, scanErr},
+		yield(DeliveryRows{
+			Tx:   tx,
+			Rows: rows,
 			Deliver: func(d Delivery) {
 				yieldDelivery(Delivery{
 					Unwrap:  d.Unwrap,
@@ -214,38 +233,33 @@ func queryDeliveries(
 				})
 			},
 		})
-		if err := <-scanErr; err != nil {
-			return fmt.Errorf("scanning: %w", err)
+
+		txFinished := false
+		select {
+		case err, txFinished = <-finishTxErr:
+		default:
+			select {
+			case <-stopcontext.Stopped(ctx):
+			case err, txFinished = <-finishTxErr:
+			}
+		}
+		if txFinished {
+			lastTx = nil
+			if err != nil {
+				return fmt.Errorf("finishing delivery transaction: %w", err)
+			}
 		}
 	}
-}
-
-type rowsCloseAfterScan struct {
-	rows sqlx.Rows
-	err  chan<- error
-}
-
-func (r rowsCloseAfterScan) Scan(into ...interface{}) error {
-	defer func() {
-		r.rows.Close()
-		err := r.rows.Err()
-		if err != nil {
-			r.err <- fmt.Errorf("iterating rows: %w", err)
-		}
-		r.err <- nil
-	}()
-
-	return r.rows.Scan(into...)
 }
 
 type AcceptQueriesFunc = func(context.Context, func(QueryWithArgs)) error
 
 type PQSubscriptionDriver struct {
-	DB                           sqlx.DB
+	DB                           sqler.DB
 	ExecInsertSubscription       func(context.Context) error
-	ListenForIncomingBaseQueries func(context.Context) (AcceptQueriesFunc, error)
+	ListenForIncomingBaseQueries func(context.Context) (accept AcceptQueriesFunc, close func() error, err error)
 	PendingBaseQuery             QueryWithArgs
-	RowsToDeliveries             func(context.Context, *DeliveryRowIterator) error
+	RowsToDeliveries             func(context.Context, *DeliveryRowsIterator) error
 	Ordered                      OrderGuarantee
 }
 
@@ -262,10 +276,10 @@ func NewQueryWithArgs(query string, args ...interface{}) QueryWithArgs {
 	return QueryWithArgs{Query: query, Args: args}
 }
 
-func (drv PQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
-	acceptIncoming, err := drv.ListenForIncomingBaseQueries(ctx)
+func (drv PQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (accept AcceptFunc, close func() error, err error) {
+	acceptIncoming, close, err := drv.ListenForIncomingBaseQueries(ctx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	return func(ctx context.Context, yield func(Delivery)) error {
@@ -286,7 +300,7 @@ func (drv PQSubscriptionDriver) ListenForDeliveries(ctx context.Context) (Accept
 			return nil
 		})
 		return wait()
-	}, nil
+	}, close, nil
 }
 
 func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, yield func(Delivery)) error {
@@ -294,29 +308,28 @@ func (drv PQSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, yiel
 	return drv.fetchDeliveries(ctx, yield, drv.Ordered.FetchPendingRows, q.Query, q.Args...)
 }
 
-// DeliveryRow is a row for a delivery with a transaction to ACK it.
-type DeliveryRow struct {
-	sqlx.Row
-	sqlx.Tx
+// DeliveryRows is a row for a delivery with a transaction to ACK it.
+type DeliveryRows struct {
+	Rows sqler.Rows
+	sqler.Tx
 	Deliver func(Delivery)
 }
 
-type beginRowDeliveryFunc = func(context.Context) (sqlx.Tx, func(DeliveryRow), error)
+type NextRowFunc sqlcoro.NextFunc
+
+type beginRowDeliveryFunc = func(context.Context) (sqler.Tx, func(DeliveryRows), error)
 
 type fetchFunc = func(
 	ctx context.Context,
 	yieldDelivery func(Delivery),
 	beginRowDelivery beginRowDeliveryFunc,
-	query func(context.Context, sqlx.Queryer, func(baseQuery string) string) (sqlx.Rows, error),
+	query func(context.Context, sqler.Queryer, func(baseQuery string) string) (sqler.Rows, error),
 ) error
 
-func (drv PQSubscriptionDriver) beginRowDelivery(yield func(DeliveryRow)) beginRowDeliveryFunc {
-	return func(ctx context.Context) (sqlx.Tx, func(DeliveryRow), error) {
+func (drv PQSubscriptionDriver) beginRowDelivery(yield func(DeliveryRows)) beginRowDeliveryFunc {
+	return func(ctx context.Context) (sqler.Tx, func(DeliveryRows), error) {
 		tx, err := drv.DB.BeginTx(ctx, nil)
-		if err != nil {
-			return nil, nil, fmt.Errorf("beginning transaction to handle delivery: %w", err)
-		}
-		return tx, yield, nil
+		return tx, yield, err
 	}
 }
 
@@ -329,16 +342,9 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 ) (err error) {
 	coroCtx, cancel := context.WithCancel(ctx)
 	g, wait := gock.Bundle()
-	rows := NewDeliveryRowIterator(g, func(yield func(DeliveryRow)) error {
-		defer func() {
-			if r := recover(); r != nil {
-				panic(r)
-			}
-		}()
-		return fetch(ctx, yieldDelivery, drv.beginRowDelivery(func(r DeliveryRow) {
-			yield(r)
-		}), func(ctx context.Context, q sqlx.Queryer, query func(baseQuery string) string) (sqlx.Rows, error) {
-			return q.Query(ctx, query(baseQuery)+" LIMIT 1", args...)
+	rows := NewDeliveryRowsIterator(g, func(yield func(DeliveryRows)) error {
+		return fetch(ctx, yieldDelivery, drv.beginRowDelivery(yield), func(ctx context.Context, q sqler.Queryer, query func(baseQuery string) string) (sqler.Rows, error) {
+			return q.Query(ctx, query(baseQuery), args...)
 		})
 	}, coro.KillOnContextDone(coroCtx))
 	g(func() error {
@@ -347,4 +353,22 @@ func (drv PQSubscriptionDriver) fetchDeliveries(
 	})
 
 	return wait()
+}
+
+func peekRows(rows sqler.Rows) (hasNext bool, _ sqler.Rows) {
+	hasNext = rows.Next()
+	return hasNext, &rowsSkipFirstNext{Rows: rows}
+}
+
+type rowsSkipFirstNext struct {
+	sqler.Rows
+	skipped bool
+}
+
+func (r *rowsSkipFirstNext) Next() bool {
+	if !r.skipped {
+		r.skipped = true
+		return true
+	}
+	return r.Rows.Next()
 }

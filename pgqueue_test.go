@@ -143,11 +143,11 @@ func TestListenBeforeFetchingPending(t *testing.T) {
 
 	m = m.InsertSubscription().TakesAny().Returns(nil).Times(1)
 
-	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (AcceptFunc, error) {
+	m = m.ListenForDeliveries().TakesAny().ReturnsFrom(func(context.Context) (AcceptFunc, func() error, error) {
 		<-listenShouldReturn
 		return func(ctx context.Context, yield func(Delivery)) error {
 			return nil
-		}, nil
+		}, func() error { return nil }, nil
 	}).Times(1)
 
 	m = m.FetchPendingDeliveries().TakesAny().AndAny().ReturnsFrom(func(context.Context, func(Delivery)) error {
@@ -195,7 +195,7 @@ func TestErrorOnListen(t *testing.T) {
 
 	driver, assertMock := (&SubscriptionDriverMocker{}).Describe().
 		InsertSubscription().TakesAny().Returns(nil).Times(1).
-		ListenForDeliveries().TakesAny().Returns(nil, expectedErr).Times(1).
+		ListenForDeliveries().TakesAny().Returns(nil, nil, expectedErr).Times(1).
 		Mock()
 	defer assertMock(t)
 
@@ -213,7 +213,7 @@ func TestErrorOnFetchPending(t *testing.T) {
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, yield func(Delivery)) error {
 		return nil
-	}, nil).Times(1)
+	}, func() error { return nil }, nil).Times(1)
 
 	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(expectedErr).Times(1)
 
@@ -234,7 +234,7 @@ func TestErrorOnAccept(t *testing.T) {
 
 	m = m.ListenForDeliveries().TakesAny().Returns(func(ctx context.Context, _ func(Delivery)) error {
 		return expectedErr
-	}, nil).Times(1)
+	}, func() error { return nil }, nil).Times(1)
 
 	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
 
@@ -276,7 +276,7 @@ func TestErrorOnUnwrap(t *testing.T) {
 				},
 			})
 		}
-	}, nil).Times(1)
+	}, func() error { return nil }, nil).Times(1)
 
 	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
 
@@ -335,7 +335,7 @@ func TestErrorOnAckError(t *testing.T) {
 
 				yield(d)
 			}
-		}, nil).Times(1)
+		}, func() error { return nil }, nil).Times(1)
 
 		m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
 
@@ -388,7 +388,7 @@ func ErrorOnRequeue(t *testing.T) {
 				},
 			})
 		}
-	}, nil).Times(1)
+	}, func() error { return nil }, nil).Times(1)
 
 	m = m.FetchPendingDeliveries().TakesAny().AndAny().Returns(nil).Times(1)
 
@@ -446,10 +446,10 @@ func (d *testSubscriptionDriver) FetchPendingDeliveries(ctx context.Context, yie
 	return d.forward(ctx, yield, d.pending)
 }
 
-func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (AcceptFunc, error) {
+func (d *testSubscriptionDriver) ListenForDeliveries(ctx context.Context) (accept AcceptFunc, close func() error, err error) {
 	return func(ctx context.Context, yield func(Delivery)) error {
 		return d.forward(ctx, yield, d.incoming)
-	}, nil
+	}, func() error { return nil }, nil
 }
 
 func (d *testSubscriptionDriver) forward(ctx context.Context, yield func(Delivery), from <-chan msgWithAck) error {

@@ -14,9 +14,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/tcard/coro"
 	"github.com/tcard/gock"
+	"github.com/tcard/sqler"
 	"gitlab.com/canastic/chantest"
 	"gitlab.com/canastic/pgqueue/stopcontext"
-	"gitlab.com/canastic/sqlx"
 	"gitlab.com/canastic/ulidx"
 )
 
@@ -211,6 +211,184 @@ func TestPQBasicUnordered(t *testing.T) {
 	}
 }
 
+func TestPQMultipleRowsPerDelivery(t *testing.T) {
+	if !enabled {
+		t.Skip("Set PGQUEUE_TEST_ENABLED=true to run")
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	db, cleanupDB := createTestDB(ctx, t)
+	defer cleanupDB()
+
+	l := NewListener(db.connStr, time.Millisecond, time.Millisecond, nil)
+	defer l.Close()
+
+	drv := newTestPQSubscriptionDriver(db, l, "test", Ordered)
+
+	consume, err := Subscribe(ctx, drv)
+	assert.NoError(t, err)
+
+	for i := 0; i < 5; i++ {
+		err := publishMessage(ctx, db, fmt.Sprintf("msg%d", i))
+		assert.NoError(t, err)
+	}
+
+	got := make(chan []string, 10)
+	ack := make(chan Ack, 1)
+
+	{
+		ctx, cancel := context.WithCancel(ctx)
+
+		assert.Error(t, context.Canceled, gock.Wait(func() error {
+			return consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
+				messages := make([]string, 0, 3)
+				return &messages, func(ctx context.Context) (context.Context, Ack) {
+					got <- messages
+					return ctx, <-ack
+				}
+			})
+		}, func() error {
+			defer cancel()
+
+			msgs := chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg0", "msg1", "msg2"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			msgs = chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg3", "msg4"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			err := publishMessage(ctx, db, "msg5")
+			assert.NoError(t, err)
+
+			msgs = chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg5"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			chantest.AssertNoRecv(t, got)
+
+			return nil
+		}))
+		chantest.AssertNoRecv(t, got)
+	}
+
+	// Ensure ACK works: we don't get duplicated messages.
+
+	{
+		ctx, cancel := context.WithCancel(ctx)
+
+		consume, err := Subscribe(ctx, drv)
+		assert.NoError(t, err)
+
+		assert.Error(t, context.Canceled, gock.Wait(func() error {
+			return consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
+				messages := make([]string, 0, 3)
+				return &messages, func(ctx context.Context) (context.Context, Ack) {
+					got <- messages
+					return ctx, <-ack
+				}
+			})
+		}, func() error {
+			defer cancel()
+
+			chantest.AssertNoRecv(t, got)
+
+			err := publishMessage(ctx, db, "msg6")
+			assert.NoError(t, err)
+
+			msgs := chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg6"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			chantest.AssertNoRecv(t, got)
+
+			return nil
+		}))
+		chantest.AssertNoRecv(t, got)
+	}
+
+	// Ensure requeue works.
+
+	err = publishMessage(ctx, db, "msg6")
+	assert.NoError(t, err)
+	err = publishMessage(ctx, db, "msg7")
+	assert.NoError(t, err)
+	err = publishMessage(ctx, db, "msg8")
+	assert.NoError(t, err)
+	err = publishMessage(ctx, db, "msg9")
+	assert.NoError(t, err)
+
+	{
+		ctx, cancel := context.WithCancel(ctx)
+
+		consume, err := Subscribe(ctx, drv)
+		assert.NoError(t, err)
+
+		assert.Error(t, context.Canceled, gock.Wait(func() error {
+			return consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
+				messages := make([]string, 0, 3)
+				return &messages, func(ctx context.Context) (context.Context, Ack) {
+					got <- messages
+					return ctx, <-ack
+				}
+			})
+		}, func() error {
+			defer cancel()
+
+			msgs := chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg6", "msg7", "msg8"}, msgs)
+
+			chantest.AssertSend(t, ack, Requeue)
+
+			chantest.AssertNoRecv(t, got)
+
+			return nil
+		}))
+		chantest.AssertNoRecv(t, got)
+	}
+
+	{
+		ctx, cancel := context.WithCancel(ctx)
+
+		consume, err := Subscribe(ctx, drv)
+		assert.NoError(t, err)
+
+		assert.Error(t, context.Canceled, gock.Wait(func() error {
+			return consume(ctx, func() (unwrapInto interface{}, handle HandleFunc) {
+				messages := make([]string, 0, 3)
+				return &messages, func(ctx context.Context) (context.Context, Ack) {
+					got <- messages
+					return ctx, <-ack
+				}
+			})
+		}, func() error {
+			defer cancel()
+
+			msgs := chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg6", "msg7", "msg8"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			msgs = chantest.Before(1*time.Second).AssertRecv(t, got).([]string)
+			assert.Equal(t, []string{"msg9"}, msgs)
+
+			chantest.AssertSend(t, ack, OK)
+
+			chantest.AssertNoRecv(t, got)
+
+			return nil
+		}))
+		chantest.AssertNoRecv(t, got)
+	}
+}
+
 func setupConsumersTest(t *testing.T, ctx context.Context, g gock.GoFunc, db sqlxTestDB, order OrderGuarantee) (consumers map[string]*testConsumer, cleanup func()) {
 	// Concurrent consumers to test mutual exclusion.
 	const concurrentConsumersPerSubscription = 2
@@ -359,12 +537,12 @@ type testConsumer struct {
 // TODO: Exhaustive failure and concurrency tests.
 
 type testPQSubscriptionDriver struct {
-	db   sqlx.DB
+	db   sqler.DB
 	l    *Listener
 	name string
 }
 
-func newTestPQSubscriptionDriver(db sqlx.DB, l *Listener, name string, ordered OrderGuarantee) PQSubscriptionDriver {
+func newTestPQSubscriptionDriver(db sqler.DB, l *Listener, name string, ordered OrderGuarantee) PQSubscriptionDriver {
 	drv := testPQSubscriptionDriver{
 		db:   db,
 		l:    l,
@@ -391,10 +569,10 @@ func (drv testPQSubscriptionDriver) ExecInsertSubscription(ctx context.Context) 
 	return ignoreUniqueViolation(err)
 }
 
-func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Context) (AcceptQueriesFunc, error) {
-	acceptNotifs, err := ListenForNotifications(ctx, drv.l, fmt.Sprintf("message:%s", drv.name))
+func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Context) (AcceptQueriesFunc, func() error, error) {
+	acceptNotifs, close, err := ListenForNotifications(ctx, drv.l, fmt.Sprintf("message:%s", drv.name))
 	if err != nil {
-		return nil, fmt.Errorf("listening for notifications: %w", err)
+		return nil, nil, fmt.Errorf("listening for notifications: %w", err)
 	}
 	return func(ctx context.Context, yield func(QueryWithArgs)) error {
 		ctx, cancel := context.WithCancel(ctx)
@@ -416,56 +594,83 @@ func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Con
 			return nil
 		})
 		return wait()
-	}, nil
+	}, close, nil
 }
 
-func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, rows *DeliveryRowIterator) error {
-	defer func() {
-		r := recover()
-		if r != nil {
-			panic(r)
-		}
-	}()
-	for rows.Next() {
-		var serial int64
-		var payload string
+func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, deliveries *DeliveryRowsIterator) error {
+	for deliveries.Next() {
+		delivery := deliveries.Yielded
 
-		err := rows.Yielded.Scan(&serial, &payload)
-		if err != nil {
-			return fmt.Errorf("scanning delivery: %w", err)
-		}
+		var firstSerial int64
+		var lastSerial int64
 
-		_, err = rows.Yielded.Exec(ctx, `
+		delivery.Deliver(Delivery{
+			Unwrap: func(into interface{}) error {
+				var payload string
+
+				switch into := into.(type) {
+				case *string:
+					delivery.Rows.Next()
+					err := delivery.Rows.Scan(&lastSerial, &payload)
+					if err != nil {
+						return err
+					}
+					firstSerial = lastSerial
+					*into = payload
+
+				case *[]string:
+					limit := -1
+					if into != nil && *into != nil {
+						limit = cap(*into)
+						*into = (*into)[:0]
+					}
+					read := 0
+					for read < limit && delivery.Rows.Next() {
+						err := delivery.Rows.Scan(&lastSerial, &payload)
+						if err != nil {
+							return err
+						}
+						if read == 0 {
+							firstSerial = lastSerial
+						}
+						*into = append(*into, payload)
+						read++
+					}
+
+				default:
+					panic(into)
+				}
+
+				delivery.Rows.Close()
+
+				_, err := delivery.Exec(ctx, `
 					UPDATE message_deliveries SET `+MarkAsDeliveredSQL+`
 					WHERE
-						serial = $1
-						AND subscription = $2
-				`, serial, drv.name)
-		if err != nil {
-			return fmt.Errorf("marking as delivered: %w", err)
-		}
+						serial >= $1 AND serial <= $2
+						AND subscription = $3
+				`, firstSerial, lastSerial, drv.name)
+				if err != nil {
+					return fmt.Errorf("marking as delivered: %w", err)
+				}
 
-		rows.Yielded.Deliver(Delivery{
-			Unwrap: func(into interface{}) error {
-				*(into.(*string)) = payload
 				return nil
 			},
 			OK: func(ctx context.Context) error {
-				_, err := rows.Yielded.Exec(ctx, `
-						DELETE FROM message_deliveries
-						WHERE
-							serial = $1
-							AND subscription = $2
-					`, serial, drv.name)
+				_, err := delivery.Exec(ctx, `
+					DELETE FROM message_deliveries
+					WHERE
+						serial >= $1 AND serial <= $2
+						AND subscription = $3
+				`, firstSerial, lastSerial, drv.name)
 				return err
 			},
 			Requeue: func(ctx context.Context) error {
-				_, err := rows.Yielded.Exec(ctx, `
-						UPDATE message_deliveries SET `+UpdateLastAckSQL+`
-						WHERE
-							serial = $1
-							AND subscription = $2
-					`, serial, drv.name)
+				_, err := delivery.Exec(ctx, `
+					UPDATE message_deliveries SET `+UpdateLastAckSQL+`
+					WHERE
+						serial >= $1 AND serial <= $2
+						AND subscription = $3
+				`, firstSerial, lastSerial, drv.name)
 				return err
 			},
 		})
@@ -475,7 +680,7 @@ func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, rows *
 
 var nextSerial int64
 
-func publishMessage(ctx context.Context, db sqlx.DB, payload string) error {
+func publishMessage(ctx context.Context, db sqler.DB, payload string) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("beginning transaction: %w", err)
@@ -525,14 +730,14 @@ func ignoreUniqueViolation(err error) error {
 }
 
 type sqlxTestDB struct {
-	sqlx.DB
+	sqler.DB
 	connStr string
 }
 
 func createTestDB(ctx context.Context, t *testing.T) (sqlxTestDB, func()) {
 	name := fmt.Sprintf("pgqueue_test_%s", strings.ToLower(ulidx.New()))
 
-	db, err := sqlxOpen("postgres", fmt.Sprintf(postgresConnString, baseDB))
+	db, err := sqler.Open("postgres", fmt.Sprintf(postgresConnString, baseDB))
 	if err != nil {
 		panic(err)
 	}
@@ -554,7 +759,7 @@ func createTestDB(ctx context.Context, t *testing.T) (sqlxTestDB, func()) {
 	}
 
 	connStr := fmt.Sprintf(postgresConnString, name)
-	testDB, err := sqlxOpen("postgres", connStr)
+	testDB, err := sqler.Open("postgres", connStr)
 	if err != nil {
 		cleanup()
 		panic(err)
@@ -576,14 +781,6 @@ func createTestDB(ctx context.Context, t *testing.T) (sqlxTestDB, func()) {
 		DB:      testDB,
 		connStr: connStr,
 	}, cleanup
-}
-
-func sqlxOpen(driverName, dataSourceName string) (sqlx.DB, error) {
-	db, err := sql.Open(driverName, dataSourceName)
-	if err != nil {
-		return nil, err
-	}
-	return sqlx.WrapDB(db), nil
 }
 
 const createScript = `

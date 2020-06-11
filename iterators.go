@@ -36,11 +36,11 @@ type DeliveryIterator struct {
 	Returned error
 }
 
-func NewDeliveryRowIterator(g func(func() error), f func(yield func(DeliveryRow)) error, options ...coro.SetOption) *DeliveryRowIterator {
-	var it DeliveryRowIterator
+func NewDeliveryRowsIterator(g func(func() error), f func(yield func(DeliveryRows)) error, options ...coro.SetOption) *DeliveryRowsIterator {
+	var it DeliveryRowsIterator
 	it.Next = coro.New(
 		func(yield func()) {
-			it.Returned = f(func(v DeliveryRow) {
+			it.Returned = f(func(v DeliveryRows) {
 				it.Yielded = v
 				yield()
 			})
@@ -52,9 +52,9 @@ func NewDeliveryRowIterator(g func(func() error), f func(yield func(DeliveryRow)
 	return &it
 }
 
-type DeliveryRowIterator struct {
+type DeliveryRowsIterator struct {
 	Next     coro.Resume
-	Yielded  DeliveryRow
+	Yielded  DeliveryRows
 	Returned error
 }
 
