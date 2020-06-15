@@ -94,7 +94,7 @@ func ListenForNotifications(
 				}
 			}
 		}, func() error {
-			return listener.Unlisten(channel)
+			return listener.Close()
 		}, nil
 }
 
