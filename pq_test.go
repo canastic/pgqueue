@@ -12,7 +12,6 @@ import (
 
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
-	"github.com/tcard/coro"
 	"github.com/tcard/gock"
 	"github.com/tcard/sqler"
 	"gitlab.com/canastic/chantest"
@@ -223,10 +222,7 @@ func TestPQMultipleRowsPerDelivery(t *testing.T) {
 	db, cleanupDB := createTestDB(ctx, t)
 	defer cleanupDB()
 
-	l := NewListener(db.connStr, time.Millisecond, time.Millisecond, nil)
-	defer l.Close()
-
-	drv := newTestPQSubscriptionDriver(db, l, "test", Ordered)
+	drv := newTestPQSubscriptionDriver(db, "test", Ordered)
 
 	consume, err := Subscribe(ctx, drv)
 	assert.NoError(t, err)
@@ -416,11 +412,7 @@ func setupConsumersTest(t *testing.T, ctx context.Context, g gock.GoFunc, db sql
 		consumers[subscription] = c
 
 		for i := 0; i < concurrentConsumersPerSubscription; i++ {
-			l := NewListener(db.connStr, time.Millisecond, time.Millisecond, nil)
-			prevCleanup := cleanup
-			cleanup = func() { l.Close(); prevCleanup() }
-
-			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, l, subscription, order))
+			consume, err := Subscribe(ctx, newTestPQSubscriptionDriver(db, subscription, order))
 			assert.NoError(t, err)
 
 			subConsume = append(subConsume, consume)
@@ -538,63 +530,34 @@ type testConsumer struct {
 
 type testPQSubscriptionDriver struct {
 	db   sqler.DB
-	l    *Listener
 	name string
 }
 
-func newTestPQSubscriptionDriver(db sqler.DB, l *Listener, name string, ordered OrderGuarantee) PQSubscriptionDriver {
+func newTestPQSubscriptionDriver(db sqler.DB, name string, ordered OrderGuarantee) PQSubscriptionDriver {
 	drv := testPQSubscriptionDriver{
 		db:   db,
-		l:    l,
 		name: name,
 	}
+	q := NewQueryWithArgs(`
+		SELECT serial, payload
+		FROM message_deliveries m
+		WHERE
+			subscription = $1
+		ORDER BY serial
+	`, name)
 	return PQSubscriptionDriver{
 		DB:                           db,
 		ExecInsertSubscription:       drv.ExecInsertSubscription,
-		ListenForIncomingBaseQueries: drv.ListenForIncomingBaseQueries,
-		PendingBaseQuery: NewQueryWithArgs(`
-			SELECT serial, payload
-			FROM message_deliveries m
-			WHERE
-				subscription = $1
-			ORDER BY serial
-		`, name),
-		RowsToDeliveries: drv.RowsToDeliveries,
-		Ordered:          ordered,
+		ListenForIncomingBaseQueries: q.PollIncomingDeliveries(10 * time.Millisecond),
+		PendingBaseQuery:             q,
+		RowsToDeliveries:             drv.RowsToDeliveries,
+		Ordered:                      ordered,
 	}
 }
 
 func (drv testPQSubscriptionDriver) ExecInsertSubscription(ctx context.Context) error {
 	_, err := drv.db.Exec(ctx, "INSERT INTO subscriptions (name) VALUES ($1);", drv.name)
 	return ignoreUniqueViolation(err)
-}
-
-func (drv testPQSubscriptionDriver) ListenForIncomingBaseQueries(ctx context.Context) (AcceptQueriesFunc, func() error, error) {
-	acceptNotifs, close, err := ListenForNotifications(ctx, drv.l, fmt.Sprintf("message:%s", drv.name))
-	if err != nil {
-		return nil, nil, fmt.Errorf("listening for notifications: %w", err)
-	}
-	return func(ctx context.Context, yield func(QueryWithArgs)) error {
-		ctx, cancel := context.WithCancel(ctx)
-		g, wait := gock.Bundle()
-		notifs := NewPQNotificationIterator(g, func(yield func(*pq.Notification)) error {
-			return acceptNotifs(ctx, yield)
-		}, coro.KillOnContextDone(ctx))
-		g(func() error {
-			defer cancel()
-			for notifs.Next() {
-				yield(NewQueryWithArgs(`
-					SELECT serial, payload
-					FROM message_deliveries m
-					WHERE
-						subscription = $1
-					ORDER BY serial
-				`, drv.name))
-			}
-			return nil
-		})
-		return wait()
-	}, close, nil
 }
 
 func (drv testPQSubscriptionDriver) RowsToDeliveries(ctx context.Context, deliveries *DeliveryRowsIterator) error {

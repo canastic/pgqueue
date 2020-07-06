@@ -14,90 +14,6 @@ import (
 	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 
-type PQListener interface {
-	Listen(channel string) error
-	Unlisten(channel string) error
-	UnlistenAll() error
-	NotificationChannel() <-chan *pq.Notification
-	Ping() error
-	Close() error
-}
-
-type Listener struct {
-	PQListener
-	errEvent <-chan error
-}
-
-func NewListener(
-	name string,
-	minReconnectInterval time.Duration,
-	maxReconnectInterval time.Duration,
-	eventCallback pq.EventCallbackType,
-) *Listener {
-	errEvent := make(chan error, 1)
-	gotErrEvent := false
-	return &Listener{
-		PQListener: pq.NewListener(name, minReconnectInterval, maxReconnectInterval, func(event pq.ListenerEventType, err error) {
-			if !gotErrEvent {
-				switch event {
-				case pq.ListenerEventDisconnected, pq.ListenerEventConnectionAttemptFailed:
-					errEvent <- err
-				}
-			}
-			if eventCallback != nil {
-				eventCallback(event, err)
-			}
-		}),
-		errEvent: errEvent,
-	}
-}
-
-func (l *Listener) Listen(ctx context.Context, channel string) error {
-	listenErr := make(chan error, 1)
-	go func() { listenErr <- l.PQListener.Listen(channel) }()
-
-	var err error
-	select {
-	case <-ctx.Done():
-		err = ctx.Err()
-	case err = <-listenErr:
-	}
-	return err
-}
-
-type AcceptPQNotificationsFunc = func(context.Context, func(*pq.Notification)) error
-
-func ListenForNotifications(
-	ctx context.Context,
-	listener *Listener,
-	channel string,
-) (accept AcceptPQNotificationsFunc, close func() error, err error) {
-	err = listener.Listen(ctx, channel)
-	if err != nil {
-		return nil, nil, fmt.Errorf("listening to channel %q: %w", channel, err)
-	}
-
-	notifs := listener.NotificationChannel()
-
-	return func(ctx context.Context, yield func(*pq.Notification)) error {
-			for {
-				select {
-				case <-stopcontext.Stopped(ctx):
-					return ctx.Err()
-				case notif, ok := <-notifs:
-					if !ok {
-						return nil
-					}
-					yield(notif)
-				case err := <-listener.errEvent:
-					return fmt.Errorf("notifications listener connection: %w", err)
-				}
-			}
-		}, func() error {
-			return listener.Close()
-		}, nil
-}
-
 type OrderGuarantee struct {
 	ordered bool
 }
@@ -261,6 +177,21 @@ type PQSubscriptionDriver struct {
 	PendingBaseQuery             QueryWithArgs
 	RowsToDeliveries             func(context.Context, *DeliveryRowsIterator) error
 	Ordered                      OrderGuarantee
+}
+
+func (q QueryWithArgs) PollIncomingDeliveries(each time.Duration) func(context.Context) (accept AcceptQueriesFunc, close func() error, err error) {
+	return func(context.Context) (accept AcceptQueriesFunc, close func() error, err error) {
+		return func(ctx context.Context, yield func(QueryWithArgs)) error {
+			for {
+				select {
+				case <-time.After(each):
+					yield(q)
+				case <-stopcontext.Stopped(ctx):
+					return nil
+				}
+			}
+		}, func() error { return nil }, nil
+	}
 }
 
 func (drv PQSubscriptionDriver) InsertSubscription(ctx context.Context) error {
