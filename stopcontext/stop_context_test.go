@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"gitlab.com/canastic/pgqueue/stopcontext"
+	"github.com/canastic/pgqueue/stopcontext"
 )
 
 func TestBasic(t *testing.T) {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/canastic/pgqueue"
 	"github.com/stretchr/testify/assert"
-	"gitlab.com/canastic/pgqueue"
 )
 
 func TestRequeueOnError(t *testing.T) {

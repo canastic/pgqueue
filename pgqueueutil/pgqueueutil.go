@@ -3,7 +3,7 @@ package pgqueueutil
 import (
 	"context"
 
-	"gitlab.com/canastic/pgqueue"
+	"github.com/canastic/pgqueue"
 )
 
 type HandleErrFunc = func(context.Context) (context.Context, error)

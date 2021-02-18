@@ -1,4 +1,7 @@
-github.com/davecgh/go-spew v1.1.0 h1:ZDRjVQ15GmhC3fiQ8ni8+OwkZQO4DARzQgrnXU1Liz8=
+github.com/canastic/chantest v0.0.0-20210218075530-34c9aad5cd57 h1:xNsJgFYZ3cKT6qCy1JOVWNNm8DMNZV8hUB8IuDn/R/A=
+github.com/canastic/chantest v0.0.0-20210218075530-34c9aad5cd57/go.mod h1:63Et6wVOQ4i0PXdeaHoeR8Jw6RP2+5h1K2LnYFTwkUo=
+github.com/canastic/ulidx v0.1.2 h1:eH90BayvIcMAVp8Lw+zK7kwaz9g3riGWz+WL2Zwbc/c=
+github.com/canastic/ulidx v0.1.2/go.mod h1:G3oOx2R9M6bw+8aA1UY4vWbZewS1uX13ovEbvEmE2DM=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
@@ -21,10 +24,6 @@ github.com/tcard/sqlcoro v0.0.0-20200611065915-908ab32c4cfa h1:IwielFVIvipy1MIEs
 github.com/tcard/sqlcoro v0.0.0-20200611065915-908ab32c4cfa/go.mod h1:OdJkEVCSQjVWE5tNgL/bGS3RBJW/NZ8i02z09EEj0q4=
 github.com/tcard/sqler v1.0.0 h1:S+77jLTSkrqH5gd7bB6OxmktEdjPPNglYpVff7y61QA=
 github.com/tcard/sqler v1.0.0/go.mod h1:aOIK0Y/aR6nu4nXwrFwKh8kwewkXNtqNL25tY3xnW3w=
-gitlab.com/canastic/chantest v0.0.0-20190916162146-fecb097c26e0 h1:JLy6oe7LgTLvGMhsgZmEqvWPK6H2PRxhN93rID2tNHU=
-gitlab.com/canastic/chantest v0.0.0-20190916162146-fecb097c26e0/go.mod h1:jCARv5p1UgAP4J+z7vF/kdO47tctzARlwkdjBgtWNyw=
-gitlab.com/canastic/ulidx v0.1.1 h1:7Voz83Ah4Hp5ZS1F6psjyppl9yUCOvTpr4+w5KSUOP4=
-gitlab.com/canastic/ulidx v0.1.1/go.mod h1:SO2Q3NifF7sr1jh+apM//tDosEHSpkF7VED2iZn6RE8=
 golang.org/x/xerrors v0.0.0-20190513163551-3ee3066db522/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898 h1:/atklqdjdhuosWIl6AIbOeHJjicWYPqR9bpxqxYG2pA=
 golang.org/x/xerrors v0.0.0-20191011141410-1b5146add898/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=

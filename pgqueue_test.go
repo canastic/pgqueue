@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/canastic/chantest"
+	"github.com/canastic/pgqueue/stopcontext"
 	"github.com/stretchr/testify/assert"
 	"github.com/tcard/gock"
-	"gitlab.com/canastic/chantest"
-	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 
 func TestSubscribe(t *testing.T) {

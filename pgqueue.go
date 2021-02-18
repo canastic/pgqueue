@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"runtime/debug"
 
+	"github.com/canastic/pgqueue/stopcontext"
 	"github.com/tcard/coro"
 	"github.com/tcard/gock"
-	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 
 // Subscribe creates a subscription and returns a function to consume from it.

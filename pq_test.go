@@ -10,13 +10,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/canastic/chantest"
+	"github.com/canastic/pgqueue/stopcontext"
+	"github.com/canastic/ulidx"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/tcard/gock"
 	"github.com/tcard/sqler"
-	"gitlab.com/canastic/chantest"
-	"gitlab.com/canastic/pgqueue/stopcontext"
-	"gitlab.com/canastic/ulidx"
 )
 
 var (

@@ -6,12 +6,12 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/canastic/pgqueue/stopcontext"
 	"github.com/lib/pq"
 	"github.com/tcard/coro"
 	"github.com/tcard/gock"
 	"github.com/tcard/sqlcoro"
 	"github.com/tcard/sqler"
-	"gitlab.com/canastic/pgqueue/stopcontext"
 )
 
 type OrderGuarantee struct {
